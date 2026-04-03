@@ -1,0 +1,46 @@
+services:
+  db:
+    image: postgres:16
+    container_name: sardoba-kassa-bot_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sardoba_bot
+      POSTGRES_USER: sardoba
+      POSTGRES_PASSWORD: sardoba
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database_schema_postgres.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sardoba -d sardoba_bot -h 127.0.0.1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  bot:
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ""
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: sardoba_bot
+      DB_USER: sardoba
+      DB_PASSWORD: sardoba
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: sardoba-kassa-bot_pgadmin
+    restart: unless-stopped
+    profiles: ["tools"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "8080:80"
+
+volumes:
+  postgres_data:

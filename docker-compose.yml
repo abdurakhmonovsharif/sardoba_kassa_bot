@@ -1,0 +1,10 @@
+services:
+  bot:
+    build: .
+    image: sardoba-kassa-bot
+    container_name: sardoba-kassa-bot_app
+    restart: unless-stopped
+    env_file:
+      - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
