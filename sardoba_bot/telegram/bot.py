@@ -104,6 +104,13 @@ class SardobaBot:
         keyboard = [[KeyboardButton("Telefon raqamni ulashish", request_contact=True)]]
         return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
 
+    def _build_cashier_menu_keyboard(self) -> ReplyKeyboardMarkup:
+        """Create the persistent cashier menu keyboard."""
+        return ReplyKeyboardMarkup(
+            [[KeyboardButton(label) for label in row] for row in CASHIER_MENU_ROWS],
+            resize_keyboard=True,
+        )
+
     async def _ask_for_phone_contact(self, message, prompt: str):
         """Ask the user to share a phone number via Telegram contact button."""
         await message.reply_text(prompt, reply_markup=self._build_contact_request_keyboard())
@@ -716,11 +723,7 @@ class SardobaBot:
     async def show_cashier_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show cashier menu"""
         menu_text = "Kassir menyusi:"
-
-        reply_markup = ReplyKeyboardMarkup(
-            [[KeyboardButton(label) for label in row] for row in CASHIER_MENU_ROWS],
-            resize_keyboard=True,
-        )
+        reply_markup = self._build_cashier_menu_keyboard()
         await update.message.reply_text(menu_text, reply_markup=reply_markup)
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2407,7 +2410,8 @@ class SardobaBot:
         try:
             await context.bot.send_message(
                 chat_id=telegram_id,
-                text="Sizning so'rovingiz tasdiqlandi. Botdan foydalanishingiz mumkin."
+                text="Sizning so'rovingiz tasdiqlandi. Botdan foydalanishingiz mumkin.",
+                reply_markup=self._build_cashier_menu_keyboard(),
             )
         except Exception:
             pass
@@ -3622,7 +3626,6 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 
 
 
