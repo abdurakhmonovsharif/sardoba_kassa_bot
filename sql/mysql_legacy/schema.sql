@@ -92,3 +92,14 @@ CREATE TABLE approval_requests (
     requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     approved_at TIMESTAMP NULL
 );
+
+-- Bot settings table for Telegram group binding
+CREATE TABLE IF NOT EXISTS bot_settings (
+    id TINYINT PRIMARY KEY,
+    group_chat_id BIGINT NULL,
+    updated_by BIGINT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+INSERT IGNORE INTO bot_settings (id, group_chat_id, updated_by)
+VALUES (1, NULL, NULL);

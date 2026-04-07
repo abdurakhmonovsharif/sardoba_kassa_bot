@@ -1,6 +1,9 @@
 python-telegram-bot==20.7
 psycopg2-binary
+asyncpg
 openpyxl
 reportlab
 Pillow
 python-dotenv
+pytest
+pytest-asyncio

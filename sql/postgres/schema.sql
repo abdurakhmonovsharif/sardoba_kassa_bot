@@ -94,9 +94,26 @@ CREATE TABLE IF NOT EXISTS approval_requests (
     approved_at TIMESTAMPTZ NULL
 );
 
+-- Bot settings
+CREATE TABLE IF NOT EXISTS bot_settings (
+    id SMALLINT PRIMARY KEY,
+    group_chat_id BIGINT,
+    updated_by BIGINT,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+INSERT INTO bot_settings (id, group_chat_id, updated_by)
+VALUES (1, NULL, NULL)
+ON CONFLICT (id) DO NOTHING;
+
 -- Useful indexes
 CREATE INDEX IF NOT EXISTS idx_shifts_user_open ON shifts(user_id, is_open);
+CREATE INDEX IF NOT EXISTS idx_shifts_opened_at ON shifts(opened_at DESC);
+CREATE INDEX IF NOT EXISTS idx_shifts_user_opened_at ON shifts(user_id, opened_at DESC);
 CREATE INDEX IF NOT EXISTS idx_reports_shift_type ON reports(shift_id, report_type);
+CREATE INDEX IF NOT EXISTS idx_reports_shift_type_latest ON reports(shift_id, report_type, id DESC);
+CREATE INDEX IF NOT EXISTS idx_reports_type_created_at ON reports(report_type, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_images_shift_type ON images(shift_id, image_type);
 CREATE INDEX IF NOT EXISTS idx_approval_status ON approval_requests(status);
-
+CREATE INDEX IF NOT EXISTS idx_approval_requests_tg_status ON approval_requests(telegram_id, status, requested_at DESC);
+CREATE INDEX IF NOT EXISTS idx_users_role_active ON users(role, is_active);

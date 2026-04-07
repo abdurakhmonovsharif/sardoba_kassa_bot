@@ -5,7 +5,6 @@
 ### Sardoba server uchun
 `.env` ichida kamida shu qiymatlar bo'lsin:
 - `TELEGRAM_BOT_TOKEN=...`
-- `GROUP_CHAT_ID=-100...` yoki `0`
 - `DATABASE_URL=postgresql://user:password@host.docker.internal:5432/sardoba_bot`
 
 Ishga tushirish:
@@ -68,7 +67,7 @@ pip install -r requirements.txt
 
 3. Set up the database (PostgreSQL):
 ```bash
-psql -U sardoba -d sardoba_bot -f database_schema_postgres.sql
+psql -U sardoba -d sardoba_bot -f sql/postgres/schema.sql
 ```
 
 4. Configure environment variables:
@@ -79,7 +78,7 @@ cp .env.example .env
 
 5. Run the bot:
 ```bash
-python bot.py
+python -m sardoba_bot
 ```
 
 ## Configuration
@@ -110,15 +109,15 @@ The bot uses the following tables:
 - `reports` - daily reports and financial data
 - `images` - uploaded images for reports
 - `approval_requests` - cashier registration requests
+- `bot_settings` - bot yuboradigan Telegram guruh sozlamalari
 
 ## Usage
 
 1. Start the bot with `/start`
-2. Select language (Uzbek/Russian)
-3. Select role (Admin/Cashier)
-4. Register with personal information and password
-5. For cashiers, wait for admin approval
-6. Use the appropriate menu based on your role
+2. Select role (Admin/Cashier)
+3. Register with personal information and password
+4. For cashiers, wait for admin approval
+5. Use the appropriate menu based on your role
 
 ### For Cashiers:
 - Open shift with opening amount
@@ -131,20 +130,27 @@ The bot uses the following tables:
 - Monitor shift activity
 - Review and approve cashier requests
 - Generate and export reports
+- Botni kerakli guruhga ulash uchun botni guruhga qo'shib, o'sha guruh ichida `/setgroup` yuboring
 
 ## File Structure
 
 ```
-bot1/
-├── bot.py              # Main bot implementation
-├── db_config.py        # Database connection utilities
-├── utils.py            # Utility functions (password hashing, validation)
-├── export_utils.py     # Excel/PDF export functionality
-├── requirements.txt    # Python dependencies
-├── docker-compose.yml  # Sardoba server compose
-├── docker-compose.local.yml # Local Postgres override
-├── database_schema_postgres.sql # PostgreSQL schema
-├── .env               # Environment variables
+sardoba_kassa_bot/
+├── sardoba_bot/
+│   ├── telegram/      # Telegram bot logic and entrypoint
+│   ├── db/            # Database connection and SQL query constants
+│   ├── services/      # Export and reporting services
+│   ├── common/        # Shared utility helpers
+│   └── core/          # Conversation states and menu constants
+├── sql/
+│   ├── postgres/      # PostgreSQL schema
+│   └── mysql_legacy/  # Legacy MySQL schema
+├── tests/             # Automated tests
+├── docker/            # Container startup scripts
+├── bot.py             # Backward-compatible wrapper
+├── db_config.py       # Backward-compatible wrapper
+├── export_utils.py    # Backward-compatible wrapper
+├── utils.py           # Backward-compatible wrapper
 └── README.md          # This file
 ```
 

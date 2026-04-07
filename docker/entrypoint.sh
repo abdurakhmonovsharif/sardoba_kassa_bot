@@ -37,4 +37,4 @@ else:
     sys.exit(1)
 PY
 
-exec python /app/bot.py
+exec python -m sardoba_bot

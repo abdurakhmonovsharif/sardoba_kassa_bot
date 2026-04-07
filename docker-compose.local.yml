@@ -9,7 +9,7 @@ services:
       POSTGRES_PASSWORD: sardoba
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./database_schema_postgres.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./sql/postgres/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U sardoba -d sardoba_bot -h 127.0.0.1"]
       interval: 5s
