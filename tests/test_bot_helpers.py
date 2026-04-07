@@ -2,8 +2,10 @@ from collections import defaultdict
 from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from zipfile import ZipFile
 
 import pytest
+from PIL import Image as PILImage
 from telegram import ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ConversationHandler
 
@@ -125,6 +127,42 @@ def test_day_bounds_and_total_balance():
         }
     )
     assert total == 1535
+
+
+def test_close_shift_progress_text_includes_percent_and_remaining():
+    bot = make_bot()
+    text = bot._build_close_shift_progress_text(3, 10, "Excel tayyorlanmoqda")
+    assert "3/10 (30%)" in text
+    assert "Excel tayyorlanmoqda" in text
+    assert "Qoldi: 7 ta bosqich" in text
+
+
+def test_shift_full_xlsx_workbook_embeds_images():
+    bot = make_bot()
+    shift = {
+        "first_name": "Ali",
+        "last_name": "Valiyev",
+        "phone_number": "+998901234567",
+        "location": "Sardoba",
+        "opened_at": "2026-04-07 05:41:00",
+        "closed_at": "2026-04-07 10:10:00",
+        "opening_amount": 1000,
+        "closing_amount": 2500,
+    }
+    report = {"sales_amount": 1500}
+    images = [{"image_type": "uzcard_payment", "image_url": "file_1", "uploaded_at": "2026-04-07 05:45:21"}]
+
+    img = PILImage.new("RGB", (4, 4), (255, 0, 0))
+    raw = BytesIO()
+    img.save(raw, format="PNG")
+
+    workbook = bot._build_shift_full_xlsx_workbook(shift, report, images, {"file_1": raw.getvalue()})
+
+    with ZipFile(BytesIO(workbook.getvalue())) as archive:
+        names = archive.namelist()
+        assert any(name.startswith("xl/media/") for name in names)
+        xml_payload = b"".join(archive.read(name) for name in names if name.endswith(".xml"))
+        assert b"file_1" not in xml_payload
 
 
 def test_build_shift_summary_message_is_readable():

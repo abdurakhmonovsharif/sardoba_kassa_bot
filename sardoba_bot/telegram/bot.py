@@ -2515,6 +2515,70 @@ class SardobaBot:
         if media_group_id:
             context.user_data["blocked_media_group_id"] = str(media_group_id)
 
+    def _build_close_shift_progress_text(self, done: int, total: int, current_step: str) -> str:
+        total = max(int(total or 0), 1)
+        done = max(0, min(int(done or 0), total))
+        percent = int((done / total) * 100)
+        remaining = max(total - done, 0)
+        return (
+            "Smena yopilmoqda. Iltimos, kuting.\n"
+            f"Jarayon: {done}/{total} ({percent}%)\n"
+            f"Hozir: {current_step}\n"
+            f"Qoldi: {remaining} ta bosqich"
+        )
+
+    async def _update_close_shift_progress(self, progress_message, done: int, total: int, current_step: str):
+        """Update one progress message so the cashier sees ongoing work."""
+        if not progress_message:
+            return
+        text = self._build_close_shift_progress_text(done, total, current_step)
+        try:
+            await progress_message.edit_text(text)
+        except Exception:
+            pass
+
+    async def _download_shift_image_blobs(self, context: ContextTypes.DEFAULT_TYPE, images: list, progress_callback=None) -> dict:
+        """Download each unique Telegram image once and reuse it across Excel exports."""
+        blobs = {}
+        seen = set()
+
+        for item in images or []:
+            file_ref = (item.get("image_url") or "").strip()
+            if not file_ref or file_ref in seen:
+                continue
+            seen.add(file_ref)
+            try:
+                tg_file = await context.bot.get_file(file_ref)
+                data = await tg_file.download_as_bytearray()
+                blobs[file_ref] = bytes(data)
+            except Exception:
+                logger.exception("Failed to download Telegram image for Excel export: %s", file_ref)
+                blobs[file_ref] = None
+            if progress_callback:
+                await progress_callback(file_ref)
+
+        return blobs
+
+    def _embed_excel_image(self, worksheet, cell: str, image_bytes, *, width: int = 260, height: int = 180) -> bool:
+        """Embed image bytes into an Excel sheet cell."""
+        if not image_bytes:
+            return False
+        try:
+            bio = BytesIO(image_bytes)
+            img = PILImage.open(bio)
+            out = BytesIO()
+            img.convert("RGB").save(out, format="JPEG", quality=85)
+            out.seek(0)
+            xl_img = XLImage(out)
+            xl_img.width = width
+            xl_img.height = height
+            # Keep the underlying buffer alive until workbook serialization finishes.
+            xl_img._source_buffer = out
+            worksheet.add_image(xl_img, cell)
+            return True
+        except Exception:
+            return False
+
     def _parse_amount(self, text: str) -> float:
         """Parse amounts like '12 300', '12,300', '12330 so'm'."""
         raw = text.strip()
@@ -2787,39 +2851,99 @@ class SardobaBot:
                         (sid,)
                     )
 
-            # Send full shift report + images report to group
+            shift_summary = await self._get_shift_summary(shift_id) or {}
+            shift_row, report_row, image_rows = await self._fetch_shift_export_data(shift_id)
+            opening_types = {
+                "workplace_status",
+                "terminal_power",
+                "zero_report",
+                "opening_notification",
+                "receipt_roll",
+            }
+            opening_image_rows = [row for row in image_rows if (row.get("image_type") or "").strip() in opening_types]
+            unique_image_refs = {
+                (row.get("image_url") or "").strip()
+                for row in image_rows
+                if (row.get("image_url") or "").strip()
+            }
+            total_steps = 7 + len(unique_image_refs)
+            progress_done = 0
+            progress_message = await update.message.reply_text(
+                self._build_close_shift_progress_text(0, total_steps, "Smena ma'lumotlari tayyorlanmoqda")
+            )
+
+            async def advance(step_label: str):
+                nonlocal progress_done
+                progress_done += 1
+                await self._update_close_shift_progress(progress_message, progress_done, total_steps, step_label)
+
+            async def on_image_download(file_ref: str):
+                short_ref = file_ref[:18] + "..." if len(file_ref) > 21 else file_ref
+                await advance(f"Rasmlar yuklanmoqda: {short_ref}")
+
             try:
-                shift_summary = await self._get_shift_summary(shift_id) or {}
+                await advance("Guruhga umumiy hisobot yuborilmoqda")
                 await self._send_group_message(
                     context,
                     self._build_shift_summary_message(shift_summary)
                 )
 
-                full_xlsx = await self._build_shift_full_xlsx(shift_id)
+                image_blobs = await self._download_shift_image_blobs(
+                    context,
+                    image_rows,
+                    progress_callback=on_image_download,
+                )
+
+                full_xlsx = await asyncio.to_thread(
+                    self._build_shift_full_xlsx_workbook,
+                    shift_row,
+                    report_row,
+                    image_rows,
+                    image_blobs,
+                )
+                await advance("Batafsil Excel tayyorlandi")
                 await self._send_group_document(
                     context,
                     full_xlsx,
                     f"kunlik_kassir_hisobot_shift_{shift_id}.xlsx",
                     caption=self._build_shift_document_caption("📎 Batafsil smena hisobot (Excel)", shift_summary)
                 )
+                await advance("Batafsil Excel guruhga yuborildi")
 
-                images_xlsx = await self._build_shift_images_xlsx(context, shift_id)
+                images_xlsx = await asyncio.to_thread(
+                    self._build_shift_images_xlsx_workbook,
+                    image_rows,
+                    image_blobs,
+                )
+                await advance("To'lov va ish rasmlari Exceli tayyorlandi")
                 await self._send_group_document(
                     context,
                     images_xlsx,
                     f"rasmlar_shift_{shift_id}.xlsx",
                     caption=self._build_shift_document_caption("🖼️ Smena rasmlari (Excel)", shift_summary)
                 )
+                await advance("Smena rasmlari Exceli guruhga yuborildi")
 
-                opening_images_xlsx = await self._build_opening_images_xlsx(context, shift_id)
+                opening_images_xlsx = await asyncio.to_thread(
+                    self._build_opening_images_xlsx_workbook,
+                    opening_image_rows,
+                    image_blobs,
+                )
+                await advance("Smena ochish rasmlari Exceli tayyorlandi")
                 await self._send_group_document(
                     context,
                     opening_images_xlsx,
                     f"smena_ochish_rasmlari_shift_{shift_id}.xlsx",
                     caption=self._build_shift_document_caption("🧰 Smena ochish rasmlari (Excel)", shift_summary)
                 )
+                await advance("Barcha fayllar guruhga yuborildi")
             except Exception:
                 logger.exception("close_shift group send failed")
+                await progress_message.edit_text(
+                    "Smena yopildi, lekin Excel yoki guruhga yuborishda xatolik bo'ldi. Admin tekshirishi kerak."
+                )
+            else:
+                await progress_message.edit_text("Smena yopildi. Barcha fayllar tayyor va yuborildi.")
 
             await update.message.reply_text("Smena yopildi.")
             await self.show_cashier_menu(update, context)
@@ -2837,16 +2961,17 @@ class SardobaBot:
             await self.show_cashier_menu(update, context)
             return MAIN_MENU
 
-    def _build_shift_full_xlsx_workbook(self, shift: dict, report: dict, images: list) -> BytesIO:
+    def _build_shift_full_xlsx_workbook(self, shift: dict, report: dict, images: list, image_blobs: Optional[dict] = None) -> BytesIO:
         """
         Build one Excel file with all cashier data for the shift:
         - Smena (opened/closed, opening/closing amount, cashier, location)
         - Sverka (all numeric fields, one row)
-        - Rasmlar (required photos + payment photos counts and file_ids)
+        - Rasmlar (required photos + payment photos with embedded images)
         """
         wb = Workbook()
         ws_shift = wb.active
         ws_shift.title = "Smena"
+        image_blobs = image_blobs or {}
 
         header_fill = PatternFill("solid", fgColor="4F4F4F")
         header_font = Font(bold=True, color="FFFFFF")
@@ -2925,23 +3050,16 @@ class SardobaBot:
 
         # Images sheet
         ws_img = wb.create_sheet("Rasmlar")
-        img_headers = ["Rasm turi", "Nechta", "Oxirgi vaqt", "File ID(lar)"]
+        img_headers = ["Rasm turi", "Sana/Vaqt", "Rasm"]
         ws_img.append(img_headers)
         for c in range(1, len(img_headers) + 1):
             cell = ws_img.cell(row=1, column=c)
             cell.fill = header_fill
             cell.font = header_font
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        ws_img.column_dimensions["A"].width = 22
-        ws_img.column_dimensions["B"].width = 10
-        ws_img.column_dimensions["C"].width = 20
-        ws_img.column_dimensions["D"].width = 70
-
-        # Group images by type
-        by_type = {}
-        for row in images:
-            t = row.get("image_type")
-            by_type.setdefault(t, []).append(row)
+        ws_img.column_dimensions["A"].width = 32
+        ws_img.column_dimensions["B"].width = 24
+        ws_img.column_dimensions["C"].width = 42
 
         type_labels = {
             "workplace_status": "Ish joyi holati (2 ta)",
@@ -2962,23 +3080,35 @@ class SardobaBot:
             "humo_payment",
         ]
 
-        r = 2
-        for t in ordered_types:
-            rows = by_type.get(t, [])
-            cnt = len(rows)
-            last_time = str(rows[-1].get("uploaded_at")) if rows else ""
-            file_ids = ", ".join([str(x.get("image_url") or "") for x in rows if x.get("image_url")])
-            ws_img.append([type_labels.get(t, t), cnt, last_time, file_ids])
-            ws_img.cell(row=r, column=2).alignment = Alignment(horizontal="center")
-            ws_img.cell(row=r, column=4).alignment = Alignment(wrap_text=True)
-            r += 1
+        ordered_images = sorted(
+            images or [],
+            key=lambda row: (
+                ordered_types.index(row.get("image_type")) if row.get("image_type") in ordered_types else len(ordered_types),
+                str(row.get("uploaded_at") or ""),
+            ),
+        )
+
+        if not ordered_images:
+            ws_img.append(["Rasmlar topilmadi.", "", ""])
+        else:
+            r = 2
+            for item in ordered_images:
+                ws_img.row_dimensions[r].height = 140
+                image_type = item.get("image_type") or ""
+                file_ref = item.get("image_url")
+                ws_img.cell(row=r, column=1, value=type_labels.get(image_type, image_type))
+                ws_img.cell(row=r, column=2, value=str(item.get("uploaded_at") or "")[:19])
+                ok = self._embed_excel_image(ws_img, f"C{r}", image_blobs.get(file_ref))
+                if not ok:
+                    ws_img.cell(row=r, column=3, value="Rasmni yuklab bo'lmadi.")
+                r += 1
 
         out = BytesIO()
         wb.save(out)
         out.seek(0)
         return out
 
-    async def _build_shift_full_xlsx(self, shift_id: int) -> BytesIO:
+    async def _fetch_shift_export_data(self, shift_id: int):
         shift = await self.db.fetch_one(
             """
             SELECT
@@ -3008,34 +3138,11 @@ class SardobaBot:
             (shift_id,)
         ) or []
 
-        return await asyncio.to_thread(self._build_shift_full_xlsx_workbook, shift, report, images)
+        return shift, report, images
 
-    async def _build_opening_images_xlsx(self, context: ContextTypes.DEFAULT_TYPE, shift_id: int) -> BytesIO:
-        """
-        Build one Excel with only shift-opening images:
-        - Ish joyi holati
-        - Terminal/ratsiya holati
-        - Nol hisobot
-        - iiko/soliq ochilish
-        - Zaxira chek lenta
-        """
-        opening_types = (
-            "workplace_status",
-            "terminal_power",
-            "zero_report",
-            "opening_notification",
-            "receipt_roll",
-        )
-        rows = await self.db.fetch_all(
-            """
-            SELECT image_type, image_url, uploaded_at
-            FROM images
-            WHERE shift_id=%s AND image_type IN (%s, %s, %s, %s, %s)
-            ORDER BY uploaded_at ASC
-            """,
-            (shift_id, *opening_types),
-        ) or []
-
+    def _build_opening_images_xlsx_workbook(self, rows: list, image_blobs: Optional[dict] = None) -> BytesIO:
+        """Build one Excel with only shift-opening images."""
+        image_blobs = image_blobs or {}
         wb = Workbook()
         ws = wb.active
         ws.title = "Smena ochish rasmlari"
@@ -3061,23 +3168,6 @@ class SardobaBot:
             "receipt_roll": "Zaxira chek lenta",
         }
 
-        async def add_img(ws_obj, cell, file_id):
-            try:
-                tg_file = await context.bot.get_file(file_id)
-                data = await tg_file.download_as_bytearray()
-                bio = BytesIO(data)
-                img = PILImage.open(bio)
-                out = BytesIO()
-                img.convert("RGB").save(out, format="JPEG", quality=85)
-                out.seek(0)
-                xl_img = XLImage(out)
-                xl_img.width = 260
-                xl_img.height = 180
-                ws_obj.add_image(xl_img, cell)
-                return True
-            except Exception:
-                return False
-
         if not rows:
             ws.cell(row=2, column=1, value="Smena ochish rasmlari topilmadi.")
             out = BytesIO()
@@ -3090,9 +3180,9 @@ class SardobaBot:
             ws.row_dimensions[r_idx].height = 140
             t = (item.get("image_type") or "").strip()
             ws.cell(row=r_idx, column=1, value=readable.get(t, t))
-            ok = await add_img(ws, f"B{r_idx}", item["image_url"])
+            ok = self._embed_excel_image(ws, f"B{r_idx}", image_blobs.get(item["image_url"]))
             if not ok:
-                ws.cell(row=r_idx, column=2, value=f"Yuklab bo'lmadi: {item['image_url']}")
+                ws.cell(row=r_idx, column=2, value="Rasmni yuklab bo'lmadi.")
             ws.cell(row=r_idx, column=3, value=str(item.get("uploaded_at") or "")[:19])
             r_idx += 1
 
@@ -3101,22 +3191,9 @@ class SardobaBot:
         out.seek(0)
         return out
 
-    async def _build_shift_images_xlsx(self, context: ContextTypes.DEFAULT_TYPE, shift_id: int) -> BytesIO:
-        """
-        Build one Excel with real images:
-        - To'lov rasmlari: Uzcard | Humo (yonma-yon)
-        - Ish jarayoni rasmlari: qolgan rasmlar ketma-ket
-        """
-        rows = await self.db.fetch_all(
-            """
-            SELECT image_type, image_url, uploaded_at
-            FROM images
-            WHERE shift_id=%s
-            ORDER BY uploaded_at ASC
-            """,
-            (shift_id,),
-        ) or []
-
+    def _build_shift_images_xlsx_workbook(self, rows: list, image_blobs: Optional[dict] = None) -> BytesIO:
+        """Build one Excel with payment images and operational images."""
+        image_blobs = image_blobs or {}
         wb = Workbook()
         ws_pay = wb.active
         ws_pay.title = "To'lov rasmlari"
@@ -3143,24 +3220,6 @@ class SardobaBot:
             else:
                 other.append(r)
 
-        async def add_img(ws, cell, file_id):
-            try:
-                tg_file = await context.bot.get_file(file_id)
-                data = await tg_file.download_as_bytearray()
-                bio = BytesIO(data)
-                # Openpyxl barqaror ishlashi uchun PIL orqali qayta saqlaymiz
-                img = PILImage.open(bio)
-                out = BytesIO()
-                img.convert("RGB").save(out, format="JPEG", quality=85)
-                out.seek(0)
-                xl_img = XLImage(out)
-                xl_img.width = 260
-                xl_img.height = 180
-                ws.add_image(xl_img, cell)
-                return True
-            except Exception:
-                return False
-
         uz_rows = pay.get("uzcard_payment", [])
         hu_rows = pay.get("humo_payment", [])
         max_len = max(len(uz_rows), len(hu_rows), 1)
@@ -3173,13 +3232,13 @@ class SardobaBot:
             hu = hu_rows[i] if i < len(hu_rows) else None
 
             if uz:
-                ok = await add_img(ws_pay, f"A{excel_row}", uz["image_url"])
+                ok = self._embed_excel_image(ws_pay, f"A{excel_row}", image_blobs.get(uz["image_url"]))
                 if not ok:
-                    ws_pay.cell(row=excel_row, column=1, value=f"Yuklab bo'lmadi: {uz['image_url']}")
+                    ws_pay.cell(row=excel_row, column=1, value="Rasmni yuklab bo'lmadi.")
             if hu:
-                ok = await add_img(ws_pay, f"B{excel_row}", hu["image_url"])
+                ok = self._embed_excel_image(ws_pay, f"B{excel_row}", image_blobs.get(hu["image_url"]))
                 if not ok:
-                    ws_pay.cell(row=excel_row, column=2, value=f"Yuklab bo'lmadi: {hu['image_url']}")
+                    ws_pay.cell(row=excel_row, column=2, value="Rasmni yuklab bo'lmadi.")
 
             stamp = (uz or hu or {}).get("uploaded_at")
             ws_pay.cell(row=excel_row, column=3, value=str(stamp)[:19] if stamp else "")
@@ -3208,9 +3267,9 @@ class SardobaBot:
             ws_other.row_dimensions[r_idx].height = 140
             t = item.get("image_type") or ""
             ws_other.cell(row=r_idx, column=1, value=readable.get(t, t))
-            ok = await add_img(ws_other, f"B{r_idx}", item["image_url"])
+            ok = self._embed_excel_image(ws_other, f"B{r_idx}", image_blobs.get(item["image_url"]))
             if not ok:
-                ws_other.cell(row=r_idx, column=2, value=f"Yuklab bo'lmadi: {item['image_url']}")
+                ws_other.cell(row=r_idx, column=2, value="Rasmni yuklab bo'lmadi.")
             ws_other.cell(row=r_idx, column=3, value=str(item.get("uploaded_at") or "")[:19])
             r_idx += 1
 
@@ -3636,10 +3695,6 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-
-
 
 
 
