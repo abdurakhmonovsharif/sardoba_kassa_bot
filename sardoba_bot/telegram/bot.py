@@ -3,6 +3,7 @@ import asyncio
 import logging
 import re
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 import warnings
 from io import BytesIO
@@ -82,6 +83,8 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+POSTGRES_SCHEMA_PATH = Path(__file__).resolve().parents[2] / "sql" / "postgres" / "schema.sql"
+
 # Silence PTB ConversationHandler per_message warnings (non-fatal)
 warnings.filterwarnings(
     "ignore",
@@ -124,7 +127,8 @@ class SardobaBot:
         return phone, None
 
     async def initialize(self):
-        await self.db.connect()
+        if not await self.db.connect():
+            raise RuntimeError("PostgreSQL connection could not be established.")
         await self._ensure_runtime_schema()
 
     async def shutdown(self):
@@ -132,48 +136,19 @@ class SardobaBot:
         await self.db.disconnect()
 
     async def _ensure_runtime_schema(self):
-        """Create lightweight runtime tables needed by the bot."""
-        await self.db.execute_query(
-            """
-            CREATE TABLE IF NOT EXISTS bot_settings (
-                id SMALLINT PRIMARY KEY,
-                group_chat_id BIGINT,
-                updated_by BIGINT,
-                updated_at TIMESTAMPTZ DEFAULT NOW()
-            )
-            """
-        )
-        await self.db.execute_query(
-            """
-            INSERT INTO bot_settings (id, group_chat_id, updated_by)
-            VALUES (1, NULL, NULL)
-            ON CONFLICT (id) DO NOTHING
-            """
-        )
-        await self.db.execute_query(
-            "CREATE INDEX IF NOT EXISTS idx_approval_requests_tg_status "
-            "ON approval_requests(telegram_id, status, requested_at DESC)"
-        )
-        await self.db.execute_query(
-            "CREATE INDEX IF NOT EXISTS idx_shifts_opened_at "
-            "ON shifts(opened_at DESC)"
-        )
-        await self.db.execute_query(
-            "CREATE INDEX IF NOT EXISTS idx_shifts_user_opened_at "
-            "ON shifts(user_id, opened_at DESC)"
-        )
-        await self.db.execute_query(
-            "CREATE INDEX IF NOT EXISTS idx_reports_shift_type_latest "
-            "ON reports(shift_id, report_type, id DESC)"
-        )
-        await self.db.execute_query(
-            "CREATE INDEX IF NOT EXISTS idx_users_role_active "
-            "ON users(role, is_active)"
-        )
-        await self.db.execute_query(
-            "CREATE INDEX IF NOT EXISTS idx_reports_type_created_at "
-            "ON reports(report_type, created_at DESC)"
-        )
+        """Apply the full PostgreSQL schema so a new database can bootstrap itself."""
+        try:
+            schema_sql = POSTGRES_SCHEMA_PATH.read_text(encoding="utf-8-sig").strip()
+        except OSError as exc:
+            raise RuntimeError(f"Failed to read PostgreSQL schema file: {POSTGRES_SCHEMA_PATH}") from exc
+
+        if not schema_sql:
+            raise RuntimeError(f"PostgreSQL schema file is empty: {POSTGRES_SCHEMA_PATH}")
+
+        if not await self.db.execute_query(schema_sql):
+            raise RuntimeError("Failed to apply PostgreSQL schema during bot startup.")
+
+        logger.info("PostgreSQL schema is ready.")
 
     async def _get_group_chat_id(self):
         if self._group_chat_id_cache is not None:
@@ -3647,7 +3622,6 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 
 
 

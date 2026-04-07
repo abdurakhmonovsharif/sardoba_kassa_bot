@@ -14,9 +14,18 @@ class FakeDB:
     def __init__(self, fetch_one_results=None, fetch_all_result=None):
         self.fetch_one_results = list(fetch_one_results or [])
         self.fetch_all_result = list(fetch_all_result or [])
+        self.connect_calls = 0
+        self.disconnect_calls = 0
         self.fetch_one_calls = []
         self.fetch_all_calls = []
         self.execute_calls = []
+
+    async def connect(self):
+        self.connect_calls += 1
+        return True
+
+    async def disconnect(self):
+        self.disconnect_calls += 1
 
     async def fetch_one(self, query, params=None):
         self.fetch_one_calls.append((query, params))
@@ -77,6 +86,22 @@ async def test_locations_are_cached_and_resolved():
     assert await bot._get_location_name(1) == "Sardoba (Severniy)"
     assert await bot._get_locations() == locations
     assert len(bot.db.fetch_all_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_initialize_applies_schema_file(monkeypatch, tmp_path):
+    schema_path = tmp_path / "schema.sql"
+    schema_path.write_text("CREATE TABLE IF NOT EXISTS users (id BIGINT PRIMARY KEY);", encoding="utf-8")
+    monkeypatch.setattr("sardoba_bot.telegram.bot.POSTGRES_SCHEMA_PATH", schema_path)
+
+    fake_db = FakeDB()
+    bot = make_bot(fake_db)
+
+    await bot.initialize()
+
+    assert fake_db.connect_calls == 1
+    assert len(fake_db.execute_calls) == 1
+    assert "CREATE TABLE IF NOT EXISTS users" in fake_db.execute_calls[0][0]
 
 
 def test_day_bounds_and_total_balance():

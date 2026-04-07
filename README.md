@@ -66,6 +66,9 @@ pip install -r requirements.txt
 ```
 
 3. Set up the database (PostgreSQL):
+The bot now applies `sql/postgres/schema.sql` automatically on startup if the DB user has `CREATE` privileges.
+
+If your DB user is restricted or you want to prepare the schema manually, run:
 ```bash
 psql -U sardoba -d sardoba_bot -f sql/postgres/schema.sql
 ```
