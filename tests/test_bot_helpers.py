@@ -1,3 +1,4 @@
+from collections import defaultdict
 from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -399,7 +400,7 @@ async def test_menu_layouts_match_constants():
 
 
 @pytest.mark.asyncio
-async def test_approve_cashier_sends_persistent_cashier_menu():
+async def test_approve_cashier_prompts_password_setup_before_menu():
     fake_db = FakeDB(
         fetch_one_results=[
             {
@@ -414,7 +415,10 @@ async def test_approve_cashier_sends_persistent_cashier_menu():
         ]
     )
     bot = make_bot(fake_db)
-    context = SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock()))
+    context = SimpleNamespace(
+        bot=SimpleNamespace(send_message=AsyncMock()),
+        application=SimpleNamespace(_user_data=defaultdict(dict)),
+    )
     update = SimpleNamespace(effective_chat=SimpleNamespace(id=-1001))
 
     await bot.approve_cashier(update, context, 77)
@@ -422,7 +426,11 @@ async def test_approve_cashier_sends_persistent_cashier_menu():
     cashier_call = context.bot.send_message.await_args_list[0]
     assert cashier_call.kwargs["chat_id"] == 77
     assert "tasdiqlandi" in cashier_call.kwargs["text"]
-    assert isinstance(cashier_call.kwargs["reply_markup"], ReplyKeyboardMarkup)
-    assert [[button.text for button in row] for row in cashier_call.kwargs["reply_markup"].keyboard] == [
-        list(row) for row in CASHIER_MENU_ROWS
-    ]
+    assert "yangi parol" in cashier_call.kwargs["text"]
+    assert isinstance(cashier_call.kwargs["reply_markup"], ReplyKeyboardRemove)
+    assert context.application._user_data[77]["cashier_set_password"] is True
+    assert context.application._user_data[77]["cashier_set_password_confirm"] is False
+    assert any(
+        "INSERT INTO users" in query and params[-1] is None
+        for query, params in fake_db.execute_calls
+    )

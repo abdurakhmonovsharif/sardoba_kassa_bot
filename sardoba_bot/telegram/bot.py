@@ -111,6 +111,20 @@ class SardobaBot:
             resize_keyboard=True,
         )
 
+    def _prime_cashier_password_setup(self, context: ContextTypes.DEFAULT_TYPE, telegram_id: int) -> None:
+        """Mark a cashier so their next message starts the password setup flow."""
+        application = getattr(context, "application", None)
+        app_user_data = getattr(application, "_user_data", None)
+        if app_user_data is None:
+            return
+
+        user_state = app_user_data[telegram_id]
+        user_state["cashier_set_password"] = True
+        user_state["cashier_set_password_confirm"] = False
+        user_state["cashier_pending_password"] = False
+        user_state["cashier_authenticated"] = False
+        user_state.pop("new_password_hash", None)
+
     async def _ask_for_phone_contact(self, message, prompt: str):
         """Ask the user to share a phone number via Telegram contact button."""
         await message.reply_text(prompt, reply_markup=self._build_contact_request_keyboard())
@@ -351,7 +365,7 @@ class SardobaBot:
                         approved_req['first_name'],
                         approved_req['last_name'],
                         approved_req['phone_number'],
-                        approved_req.get('password_hash')
+                        None
                     )
                 )
                 existing = await self.db.fetch_one(
@@ -791,7 +805,7 @@ class SardobaBot:
                         approved_req['first_name'],
                         approved_req['last_name'],
                         approved_req['phone_number'],
-                        approved_req.get('password_hash')
+                        None
                     )
                 )
                 user = await self.db.fetch_one(CommonQueries.ACTIVE_USER_BY_TELEGRAM_ID, (user_id,))
@@ -2381,23 +2395,17 @@ class SardobaBot:
         # Insert or reactivate user
         user = await self.db.fetch_one("SELECT * FROM users WHERE telegram_id = %s", (telegram_id,))
         if user:
-            if not user.get('password_hash') and req.get('password_hash'):
-                await self.db.execute_query(
-                    "UPDATE users SET role = 'cashier', is_active = TRUE, password_hash = %s WHERE telegram_id = %s",
-                    (req.get('password_hash'), telegram_id)
-                )
-            else:
-                await self.db.execute_query(
-                    "UPDATE users SET role = 'cashier', is_active = TRUE WHERE telegram_id = %s",
-                    (telegram_id,)
-                )
+            await self.db.execute_query(
+                "UPDATE users SET role = 'cashier', is_active = TRUE, password_hash = NULL WHERE telegram_id = %s",
+                (telegram_id,)
+            )
         else:
             await self.db.execute_query(
                 """
                 INSERT INTO users (telegram_id, first_name, last_name, phone_number, role, password_hash, is_active)
                 VALUES (%s, %s, %s, %s, 'cashier', %s, TRUE)
                 """,
-                (req['telegram_id'], req['first_name'], req['last_name'], req['phone_number'], req.get('password_hash'))
+                (req['telegram_id'], req['first_name'], req['last_name'], req['phone_number'], None)
             )
 
         # Update request status
@@ -2406,12 +2414,14 @@ class SardobaBot:
             (telegram_id,)
         )
 
+        self._prime_cashier_password_setup(context, telegram_id)
+
         # Notify cashier
         try:
             await context.bot.send_message(
                 chat_id=telegram_id,
-                text="Sizning so'rovingiz tasdiqlandi. Botdan foydalanishingiz mumkin.",
-                reply_markup=self._build_cashier_menu_keyboard(),
+                text="Sizning so'rovingiz tasdiqlandi. Endi yangi parol kiriting:",
+                reply_markup=ReplyKeyboardRemove(),
             )
         except Exception:
             pass
@@ -3626,7 +3636,6 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 
 
 
