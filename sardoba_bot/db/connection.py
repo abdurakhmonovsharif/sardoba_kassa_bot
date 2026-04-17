@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+TASHKENT_TIMEZONE = "Asia/Tashkent"
 
 
 class DatabaseConnection:
@@ -47,6 +48,7 @@ class DatabaseConnection:
                 "dsn": self.database_url,
                 "timeout": self.connect_timeout,
                 "command_timeout": self.command_timeout,
+                "server_settings": {"timezone": TASHKENT_TIMEZONE},
             }
         return {
             "host": self.host,
@@ -56,6 +58,7 @@ class DatabaseConnection:
             "port": self.port,
             "timeout": self.connect_timeout,
             "command_timeout": self.command_timeout,
+            "server_settings": {"timezone": TASHKENT_TIMEZONE},
         }
 
     @staticmethod

@@ -2,6 +2,9 @@ import hashlib
 import secrets
 from datetime import datetime
 import re
+from zoneinfo import ZoneInfo
+
+TASHKENT_TZ = ZoneInfo("Asia/Tashkent")
 
 def hash_password(password):
     """Hash a password with a random salt"""
@@ -36,7 +39,7 @@ def verify_password(stored_password, provided_password):
 
 def get_current_timestamp():
     """Get current timestamp in readable format"""
-    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    return datetime.now(TASHKENT_TZ).strftime('%Y-%m-%d %H:%M:%S')
 
 def format_currency(amount):
     """Format amount as currency"""

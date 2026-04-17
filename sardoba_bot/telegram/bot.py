@@ -1,5 +1,6 @@
 ﻿# -*- coding: utf-8 -*-
 import asyncio
+import json
 import logging
 import re
 from datetime import datetime, timedelta
@@ -14,7 +15,17 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.drawing.image import Image as XLImage
 from PIL import Image as PILImage
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove, KeyboardButton, InputFile
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+    KeyboardButton,
+    InputFile,
+    InputMediaPhoto,
+    InputMediaDocument,
+)
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler, CallbackQueryHandler
 from telegram.request import HTTPXRequest
 from sardoba_bot.core.constants import (
@@ -64,6 +75,7 @@ from sardoba_bot.core.constants import (
     ADMIN_REGISTER_PHONE,
     ADMIN_VERIFY_PASSWORD,
     CLOSE_SHIFT,
+    CLOSE_SHIFT_NOTE,
 )
 from sardoba_bot.db.queries import AdminQueries, CashierQueries, CommonQueries
 from sardoba_bot.db.connection import DatabaseConnection
@@ -84,6 +96,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 POSTGRES_SCHEMA_PATH = Path(__file__).resolve().parents[2] / "sql" / "postgres" / "schema.sql"
+TASHKENT_TZ = ZoneInfo("Asia/Tashkent")
+CASHIER_RESUME_ACTION_TTL_MINUTES = 15
 
 # Silence PTB ConversationHandler per_message warnings (non-fatal)
 warnings.filterwarnings(
@@ -111,6 +125,14 @@ class SardobaBot:
             resize_keyboard=True,
         )
 
+    def _build_expense_payment_type_keyboard(self) -> ReplyKeyboardMarkup:
+        """Create a keyboard for expense payment type selection."""
+        return ReplyKeyboardMarkup(
+            [[KeyboardButton("Naqd"), KeyboardButton("Karta"), KeyboardButton("P2P")]],
+            resize_keyboard=True,
+            one_time_keyboard=True,
+        )
+
     def _prime_cashier_password_setup(self, context: ContextTypes.DEFAULT_TYPE, telegram_id: int) -> None:
         """Mark a cashier so their next message starts the password setup flow."""
         application = getattr(context, "application", None)
@@ -124,6 +146,60 @@ class SardobaBot:
         user_state["cashier_pending_password"] = False
         user_state["cashier_authenticated"] = False
         user_state.pop("new_password_hash", None)
+
+    def _set_cashier_resume_action(self, context: ContextTypes.DEFAULT_TYPE, action_name: Optional[str]) -> None:
+        """Remember cashier intent so auth can resume it."""
+        if not action_name:
+            return
+        context.user_data["cashier_resume_action"] = action_name
+        context.user_data["cashier_resume_action_at"] = self._now_tashkent().isoformat()
+
+    def _clear_cashier_resume_action(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        context.user_data.pop("cashier_resume_action", None)
+        context.user_data.pop("cashier_resume_action_at", None)
+
+    def _consume_cashier_resume_action(self, context: ContextTypes.DEFAULT_TYPE) -> tuple[Optional[str], bool]:
+        """Return pending action and whether it expired."""
+        action_name = context.user_data.get("cashier_resume_action")
+        action_at_raw = context.user_data.get("cashier_resume_action_at")
+        self._clear_cashier_resume_action(context)
+
+        if not action_name:
+            return None, False
+
+        if not action_at_raw:
+            return action_name, False
+
+        try:
+            action_at = datetime.fromisoformat(str(action_at_raw))
+            if action_at.tzinfo is None:
+                action_at = action_at.replace(tzinfo=TASHKENT_TZ)
+        except ValueError:
+            return None, True
+
+        is_expired = (self._now_tashkent() - action_at) > timedelta(minutes=CASHIER_RESUME_ACTION_TTL_MINUTES)
+        if is_expired:
+            return None, True
+        return action_name, False
+
+    async def _resume_cashier_post_auth_action(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+        """Continue pending cashier action right after successful auth."""
+        action_name, expired = self._consume_cashier_resume_action(context)
+        if expired:
+            await update.message.reply_text("Sessiya muddati tugagan. Iltimos, menyudan qayta tanlang.")
+            await self.show_cashier_menu(update, context)
+            return True
+
+        if not action_name:
+            return False
+
+        action = getattr(self, action_name, None)
+        if not action:
+            await self.show_cashier_menu(update, context)
+            return True
+
+        await action(update, context)
+        return True
 
     async def _ask_for_phone_contact(self, message, prompt: str):
         """Ask the user to share a phone number via Telegram contact button."""
@@ -192,12 +268,14 @@ class SardobaBot:
         row = await self.db.fetch_one(CommonQueries.LOCATION_NAME_BY_ID, (location_id,))
         return row.get("name") if row else str(location_id)
 
+    def _now_tashkent(self) -> datetime:
+        return datetime.now(TASHKENT_TZ)
+
     def _day_bounds(self, start, end=None):
         start_day = datetime.fromisoformat(str(start)).date()
         end_day = datetime.fromisoformat(str(end or start)).date()
-        tz = ZoneInfo("Asia/Tashkent")
-        start_bound = datetime.combine(start_day, datetime.min.time(), tzinfo=tz)
-        end_bound = datetime.combine(end_day + timedelta(days=1), datetime.min.time(), tzinfo=tz)
+        start_bound = datetime.combine(start_day, datetime.min.time(), tzinfo=TASHKENT_TZ)
+        end_bound = datetime.combine(end_day + timedelta(days=1), datetime.min.time(), tzinfo=TASHKENT_TZ)
         return start_bound, end_bound
 
     def _fmt_money(self, value) -> str:
@@ -211,9 +289,189 @@ class SardobaBot:
         if not value:
             return "-"
         try:
-            return value.astimezone(ZoneInfo("Asia/Tashkent")).strftime("%Y-%m-%d %H:%M:%S")
+            return value.astimezone(TASHKENT_TZ).strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             return str(value)[:19]
+
+    def _parse_report_data(self, value) -> dict:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str) and value.strip():
+            try:
+                parsed = json.loads(value)
+            except Exception:
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return {}
+
+    def _normalize_payment_type(self, text: str) -> Optional[str]:
+        normalized = (text or "").strip().lower()
+        return {
+            "naqd": "Naqd",
+            "karta": "Karta",
+            "p2p": "P2P",
+        }.get(normalized)
+
+    def _normalize_expense_payment_type(self, text: str) -> Optional[str]:
+        return self._normalize_payment_type(text)
+
+    def _sverka_payment_method_labels(self) -> dict[str, str]:
+        return {
+            "other_payments": "Boshqa to'lovlar",
+            "debt_refunds": "Vozvrat qarzlar",
+        }
+
+    def _clear_generic_payment_method_state(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        for key in (
+            "other_payments_detail_stage",
+            "other_payments_payment_type",
+            "debt_refunds_detail_stage",
+            "debt_refunds_payment_type",
+        ):
+            context.user_data.pop(key, None)
+
+    def _clear_debt_received_detail_state(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        for key in (
+            "debt_received_detail_stage",
+            "debt_received_payment_type",
+            "debt_received_counterparty_name",
+            "debt_received_counterparty_phone",
+        ):
+            context.user_data.pop(key, None)
+
+    def _clear_debt_payments_detail_state(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        for key in (
+            "debt_payments_detail_stage",
+            "debt_payments_payment_type",
+            "debt_payments_counterparty_name",
+            "debt_payments_counterparty_phone",
+        ):
+            context.user_data.pop(key, None)
+
+    def _clear_expense_detail_state(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        for key in (
+            "expense_detail_stage",
+            "expense_payment_type",
+            "expense_paid_to",
+            "expense_recipient_name",
+            "expense_recipient_phone",
+            "expense_reason",
+        ):
+            context.user_data.pop(key, None)
+
+    def _build_report_data_payload(self, context: ContextTypes.DEFAULT_TYPE) -> dict:
+        payload = {}
+
+        if float(context.user_data.get("debt_received") or 0) > 0:
+            debt_received_detail = {
+                "counterparty_name": context.user_data.get("debt_received_counterparty_name"),
+                "counterparty_phone": context.user_data.get("debt_received_counterparty_phone"),
+                "payment_type": context.user_data.get("debt_received_payment_type"),
+            }
+            debt_received_detail = {
+                key: value for key, value in debt_received_detail.items() if value not in (None, "")
+            }
+            if debt_received_detail:
+                payload["debt_received_detail"] = debt_received_detail
+
+        if float(context.user_data.get("debt_payments") or 0) > 0:
+            debt_payments_detail = {
+                "counterparty_name": context.user_data.get("debt_payments_counterparty_name"),
+                "counterparty_phone": context.user_data.get("debt_payments_counterparty_phone"),
+                "payment_type": context.user_data.get("debt_payments_payment_type"),
+            }
+            debt_payments_detail = {
+                key: value for key, value in debt_payments_detail.items() if value not in (None, "")
+            }
+            if debt_payments_detail:
+                payload["debt_payments_detail"] = debt_payments_detail
+
+        if float(context.user_data.get("expenses") or 0) > 0:
+            expense_detail = {
+                "payment_type": context.user_data.get("expense_payment_type"),
+                "paid_to": context.user_data.get("expense_paid_to"),
+                "recipient_name": context.user_data.get("expense_recipient_name"),
+                "recipient_phone": context.user_data.get("expense_recipient_phone"),
+                "reason": context.user_data.get("expense_reason"),
+            }
+            expense_detail = {
+                key: value for key, value in expense_detail.items() if value not in (None, "")
+            }
+            if expense_detail:
+                payload["expense_detail"] = expense_detail
+
+        payment_methods = {}
+        for key in self._sverka_payment_method_labels():
+            amount = float(context.user_data.get(key) or 0)
+            payment_type = context.user_data.get(f"{key}_payment_type")
+            if amount > 0 and payment_type:
+                payment_methods[key] = payment_type
+        if payment_methods:
+            payload["payment_methods"] = payment_methods
+
+        return payload
+
+    def _build_debt_received_detail_lines(self, row) -> list[str]:
+        report_data = self._parse_report_data((row or {}).get("report_data"))
+        detail = report_data.get("debt_received_detail")
+        if not isinstance(detail, dict) or not detail:
+            return []
+
+        lines = ["📌 Kelgan qarz tafsiloti"]
+        if detail.get("counterparty_name"):
+            lines.append(f"👤 Kimdan: {detail['counterparty_name']}")
+        if detail.get("counterparty_phone"):
+            lines.append(f"📞 Telefon: {detail['counterparty_phone']}")
+        if detail.get("payment_type"):
+            lines.append(f"💳 To'lov turi: {detail['payment_type']}")
+        return lines
+
+    def _build_debt_payments_detail_lines(self, row) -> list[str]:
+        report_data = self._parse_report_data((row or {}).get("report_data"))
+        detail = report_data.get("debt_payments_detail")
+        if not isinstance(detail, dict) or not detail:
+            return []
+
+        lines = ["📌 Qarz to'lovi tafsiloti"]
+        if detail.get("counterparty_name"):
+            lines.append(f"👤 Kimga: {detail['counterparty_name']}")
+        if detail.get("counterparty_phone"):
+            lines.append(f"📞 Telefon: {detail['counterparty_phone']}")
+        if detail.get("payment_type"):
+            lines.append(f"💳 To'lov turi: {detail['payment_type']}")
+        return lines
+
+    def _build_expense_detail_lines(self, row) -> list[str]:
+        report_data = self._parse_report_data((row or {}).get("report_data"))
+        detail = report_data.get("expense_detail")
+        if not isinstance(detail, dict) or not detail:
+            return []
+
+        lines = ["📌 Chiqim tafsiloti"]
+        if detail.get("payment_type"):
+            lines.append(f"💳 To'lov turi: {detail['payment_type']}")
+        if detail.get("paid_to"):
+            lines.append(f"🏷️ Kimga berildi: {detail['paid_to']}")
+        if detail.get("recipient_name"):
+            lines.append(f"👤 Ism: {detail['recipient_name']}")
+        if detail.get("recipient_phone"):
+            lines.append(f"📞 Telefon: {detail['recipient_phone']}")
+        if detail.get("reason"):
+            lines.append(f"📝 Sabab: {detail['reason']}")
+        return lines
+
+    def _build_payment_method_lines(self, row) -> list[str]:
+        report_data = self._parse_report_data((row or {}).get("report_data"))
+        methods = report_data.get("payment_methods")
+        if not isinstance(methods, dict) or not methods:
+            return []
+        labels = self._sverka_payment_method_labels()
+        lines = ["💳 To'lov turlari"]
+        for key, label in labels.items():
+            method = methods.get(key)
+            if method:
+                lines.append(f"• {label}: {method}")
+        return lines if len(lines) > 1 else []
 
     def _calculate_total_balance(self, row) -> float:
         def _num(key: str) -> float:
@@ -257,7 +515,8 @@ class SardobaBot:
                 COALESCE(r.humo_refund, 0) AS humo_refund,
                 COALESCE(r.other_payments, 0) AS other_payments,
                 COALESCE(r.debt_payments, 0) AS debt_payments,
-                COALESCE(r.debt_refunds, 0) AS debt_refunds
+                COALESCE(r.debt_refunds, 0) AS debt_refunds,
+                COALESCE(r.report_data, '{}'::jsonb) AS report_data
             FROM shifts s
             JOIN users u ON s.user_id = u.id
             JOIN locations l ON s.location_id = l.id
@@ -272,7 +531,8 @@ class SardobaBot:
                     humo_refund,
                     other_payments,
                     debt_payments,
-                    debt_refunds
+                    debt_refunds,
+                    report_data
                 FROM reports
                 WHERE shift_id = s.id AND report_type = 'daily_report'
                 ORDER BY id DESC
@@ -285,7 +545,7 @@ class SardobaBot:
 
     def _build_shift_summary_message(self, row) -> str:
         cashier_name = f"{row.get('first_name', '')} {row.get('last_name') or ''}".strip() or "Kassir"
-        report_date = str(row.get("opened_at") or "")[:10] or datetime.now().strftime("%Y-%m-%d")
+        report_date = str(row.get("opened_at") or "")[:10] or self._now_tashkent().strftime("%Y-%m-%d")
         total_balance = self._calculate_total_balance(row)
         lines = [
             "📊 Kunlik umumiy hisobot",
@@ -310,11 +570,56 @@ class SardobaBot:
             f"🤝 Qarzga berilgan to'lovlar: {self._fmt_money(row.get('debt_payments'))}",
             f"🔁 Vozvrat qarzlar: {self._fmt_money(row.get('debt_refunds'))}",
         ]
+        debt_received_lines = self._build_debt_received_detail_lines(row)
+        if debt_received_lines:
+            lines.extend(["", *debt_received_lines])
+        debt_payments_lines = self._build_debt_payments_detail_lines(row)
+        if debt_payments_lines:
+            lines.extend(["", *debt_payments_lines])
+        expense_lines = self._build_expense_detail_lines(row)
+        if expense_lines:
+            lines.extend(["", *expense_lines])
+        payment_method_lines = self._build_payment_method_lines(row)
+        if payment_method_lines:
+            lines.extend(["", *payment_method_lines])
+        return "\n".join(lines)
+
+    def _build_sverka_summary_message(self, row) -> str:
+        cashier_name = f"{row.get('first_name', '')} {row.get('last_name') or ''}".strip() or "Kassir"
+        report_date = str(row.get("opened_at") or "")[:10] or self._now_tashkent().strftime("%Y-%m-%d")
+        lines = [
+            "🧾 Sverka yakunlandi",
+            f"👤 Kassir: {cashier_name}",
+            f"🏬 Filial: {row.get('location') or '-'}",
+            f"📅 Sana: {report_date}",
+            f"💸 Savdo: {self._fmt_money(row.get('sales_amount'))}",
+            f"📥 Kelgan qarz: {self._fmt_money(row.get('debt_received'))}",
+            f"📉 Chiqim: {self._fmt_money(row.get('expenses'))}",
+            f"💳 Uzcard: {self._fmt_money(row.get('uzcard_amount'))}",
+            f"💳 Humo: {self._fmt_money(row.get('humo_amount'))}",
+            f"↩️ Uzcard vozvrat: {self._fmt_money(row.get('uzcard_refund'))}",
+            f"↩️ Humo vozvrat: {self._fmt_money(row.get('humo_refund'))}",
+            f"🧷 Boshqa to'lovlar: {self._fmt_money(row.get('other_payments'))}",
+            f"🤝 Qarzga berilgan to'lovlar: {self._fmt_money(row.get('debt_payments'))}",
+            f"🔁 Vozvrat qarzlar: {self._fmt_money(row.get('debt_refunds'))}",
+        ]
+        debt_received_lines = self._build_debt_received_detail_lines(row)
+        if debt_received_lines:
+            lines.extend(["", *debt_received_lines])
+        debt_payments_lines = self._build_debt_payments_detail_lines(row)
+        if debt_payments_lines:
+            lines.extend(["", *debt_payments_lines])
+        expense_lines = self._build_expense_detail_lines(row)
+        if expense_lines:
+            lines.extend(["", *expense_lines])
+        payment_method_lines = self._build_payment_method_lines(row)
+        if payment_method_lines:
+            lines.extend(["", *payment_method_lines])
         return "\n".join(lines)
 
     def _build_shift_document_caption(self, title: str, row) -> str:
         cashier_name = f"{row.get('first_name', '')} {row.get('last_name') or ''}".strip() or "Kassir"
-        report_date = str(row.get("opened_at") or "")[:10] or datetime.now().strftime("%Y-%m-%d")
+        report_date = str(row.get("opened_at") or "")[:10] or self._now_tashkent().strftime("%Y-%m-%d")
         return (
             f"{title}\n"
             f"👤 {cashier_name}\n"
@@ -324,6 +629,52 @@ class SardobaBot:
 
     def _build_export_caption(self, title: str, file_type: str) -> str:
         return f"📊 {title}\n📎 Format: {file_type}\n✅ Fayl tayyor."
+
+    def _build_shift_opened_message(self, cashier_name: str, location_name: str, opening_amount, opening_time: str) -> str:
+        return (
+            f"Smena ochildi: {cashier_name}\n"
+            f"Filial: {location_name}\n"
+            f"Ochish summasi: {self._fmt_money(opening_amount)}\n"
+            f"Vaqt: {opening_time or '-'}"
+        )
+
+    def _build_shift_closed_message(self, row, note: str) -> str:
+        cashier_name = f"{row.get('first_name', '')} {row.get('last_name') or ''}".strip() or "Kassir"
+        safe_note = (note or "").strip() or "Izoh qoldirilmadi"
+        return (
+            "🔒 Smena yopildi\n"
+            f"👤 Kassir: {cashier_name}\n"
+            f"🏬 Filial: {row.get('location') or '-'}\n"
+            f"💰 Yopish summasi: {self._fmt_money(row.get('closing_amount'))}\n"
+            f"🕙 Yopilish vaqti: {self._fmt_datetime(row.get('closed_at'))}\n"
+            f"📝 Izoh: {safe_note}"
+        )
+
+    def _build_payment_image_uploaded_message(self, image_title: str, shift_meta: dict, event_time) -> str:
+        return (
+            f"✅ To'lov rasmi qabul qilindi\n"
+            f"📷 Tur: {image_title}\n"
+            f"👤 Kassir: {shift_meta.get('cashier') or '-'}\n"
+            f"🏬 Filial: {shift_meta.get('location') or '-'}\n"
+            f"⏰ Vaqt: {self._format_telegram_time(event_time)}"
+        )
+
+    def _build_report_edit_success_message(
+        self,
+        cashier_name: str,
+        location_name: str,
+        field_label: str,
+        amount,
+        event_time=None,
+    ) -> str:
+        return (
+            "✏️ Hisobot yangilandi\n"
+            f"👤 Kassir: {cashier_name or '-'}\n"
+            f"🏬 Filial: {location_name or '-'}\n"
+            f"🧾 Band: {field_label}\n"
+            f"💰 Yangi qiymat: {self._fmt_money(amount)}\n"
+            f"⏰ Vaqt: {self._format_telegram_time(event_time)}"
+        )
         
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Start command handler"""
@@ -334,6 +685,19 @@ class SardobaBot:
         context.user_data.pop('pending_sverka_state', None)
         context.user_data.pop('pending_edit_key', None)
         context.user_data.pop('pending_payment_image', None)
+        self._clear_debt_received_detail_state(context)
+        self._clear_debt_payments_detail_state(context)
+        self._clear_expense_detail_state(context)
+        self._clear_generic_payment_method_state(context)
+        self._clear_cashier_resume_action(context)
+        context.user_data.pop("pending_opening_group_photos", None)
+        context.user_data.pop("opening_stage_locked_media_group_id", None)
+        context.user_data.pop("opening_stage_locked_name", None)
+        context.user_data.pop("pending_next_opening_stage", None)
+        context.user_data.pop("opening_stage_completed_prompt_sent", None)
+        self._cancel_receipt_roll_finalize_task(context)
+        context.user_data.pop("receipt_roll_finalize_token", None)
+        context.user_data.pop("opening_finalize_done", None)
         context.user_data['flow'] = None
         try:
             # Best-effort: if DB restarted, reconnect automatically.
@@ -444,6 +808,46 @@ class SardobaBot:
         await message.reply_text(
             f"Ulandi: {chat_title}\nEndi hisobotlar shu guruhga yuboriladi."
         )
+
+    async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Cancel active flow and clear deferred cashier action."""
+        self._clear_cashier_resume_action(context)
+        context.user_data.pop("pending_opening_group_photos", None)
+        context.user_data.pop("opening_stage_locked_media_group_id", None)
+        context.user_data.pop("opening_stage_locked_name", None)
+        context.user_data.pop("pending_next_opening_stage", None)
+        context.user_data.pop("opening_stage_completed_prompt_sent", None)
+        self._cancel_receipt_roll_finalize_task(context)
+        context.user_data.pop("receipt_roll_finalize_token", None)
+        context.user_data.pop("opening_finalize_done", None)
+        context.user_data['flow'] = None
+        context.user_data.pop('pending_sverka_key', None)
+        context.user_data.pop('pending_sverka_state', None)
+        context.user_data.pop('pending_edit_key', None)
+        context.user_data.pop('pending_payment_image', None)
+        context.user_data.pop('opening_stage', None)
+        context.user_data['cashier_pending_password'] = False
+        context.user_data['cashier_set_password'] = False
+        context.user_data['cashier_set_password_confirm'] = False
+        self._clear_debt_received_detail_state(context)
+        self._clear_debt_payments_detail_state(context)
+        self._clear_expense_detail_state(context)
+        self._clear_generic_payment_method_state(context)
+
+        message = update.effective_message
+        user = await self.db.fetch_one(
+            CommonQueries.ACTIVE_USER_BY_TELEGRAM_ID,
+            (update.effective_user.id,),
+        )
+        if not message:
+            return ConversationHandler.END
+
+        await message.reply_text("Jarayon bekor qilindi.")
+        if user and user.get("role") == "admin":
+            await self.show_admin_menu(update, context)
+        elif user and user.get("role") == "cashier":
+            await self.show_cashier_menu(update, context)
+        return ConversationHandler.END
 
     async def register_firstname(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Get user's first name"""
@@ -719,26 +1123,35 @@ class SardobaBot:
         """Show admin menu"""
         context.user_data['admin_reports_range_pending'] = False
         menu_text = "Administrator menyusi:"
+        message = getattr(update, "effective_message", None) or getattr(update, "message", None)
+        if not message:
+            return
 
         reply_markup = ReplyKeyboardMarkup(
             [[KeyboardButton(label) for label in row] for row in ADMIN_MENU_ROWS],
             resize_keyboard=True,
         )
-        await update.message.reply_text(menu_text, reply_markup=reply_markup)
+        await message.reply_text(menu_text, reply_markup=reply_markup)
 
     async def show_admin_reports_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show admin report period options."""
+        message = getattr(update, "effective_message", None) or getattr(update, "message", None)
+        if not message:
+            return
         reply_markup = ReplyKeyboardMarkup(
             [[KeyboardButton(label) for label in row] for row in ADMIN_REPORTS_MENU_ROWS],
             resize_keyboard=True,
         )
-        await update.message.reply_text("Qaysi hisobot kerak?", reply_markup=reply_markup)
+        await message.reply_text("Qaysi hisobot kerak?", reply_markup=reply_markup)
 
     async def show_cashier_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show cashier menu"""
         menu_text = "Kassir menyusi:"
         reply_markup = self._build_cashier_menu_keyboard()
-        await update.message.reply_text(menu_text, reply_markup=reply_markup)
+        message = getattr(update, "effective_message", None) or getattr(update, "message", None)
+        if not message:
+            return
+        await message.reply_text(menu_text, reply_markup=reply_markup)
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle general messages based on user state"""
@@ -778,7 +1191,10 @@ class SardobaBot:
                 return
             # Fallback: agar ConversationHandler state yo'qolgan bo'lsa ham oqim davom etsin
             if context.user_data.get('flow') == 'closing':
-                await self.close_shift(update, context)
+                if context.user_data.get("pending_close_amount") is not None:
+                    await self.close_shift_note(update, context)
+                else:
+                    await self.close_shift(update, context)
                 return
             if context.user_data.get('flow') == 'opening':
                 # Location tanlanganidan keyin summa kiritish bosqichi
@@ -855,7 +1271,9 @@ class SardobaBot:
                         context.user_data['cashier_set_password_confirm'] = False
                         context.user_data['cashier_authenticated'] = True
                         await update.message.reply_text("Parol o'rnatildi.")
-                        await self.show_cashier_menu(update, context)
+                        resumed = await self._resume_cashier_post_auth_action(update, context)
+                        if not resumed:
+                            await self.show_cashier_menu(update, context)
                     else:
                         context.user_data['cashier_set_password'] = True
                         context.user_data['cashier_set_password_confirm'] = False
@@ -868,12 +1286,15 @@ class SardobaBot:
             # Require password on each new /start or session
             if context.user_data.get('cashier_pending_password'):
                 if text in CASHIER_MENU_TEXTS:
-                    await update.message.reply_text("Avval parolni kiriting.")
+                    self._set_cashier_resume_action(context, CASHIER_DIRECT_ACTIONS.get(text))
+                    await update.message.reply_text("Tanlangan amal saqlandi. Avval parolni kiriting.")
                     return
                 if user.get('password_hash') and verify_password(user['password_hash'], text):
                     context.user_data['cashier_pending_password'] = False
                     context.user_data['cashier_authenticated'] = True
-                    await self.show_cashier_menu(update, context)
+                    resumed = await self._resume_cashier_post_auth_action(update, context)
+                    if not resumed:
+                        await self.show_cashier_menu(update, context)
                 else:
                     await update.message.reply_text(
                         "Parol noto'g'ri. Qayta kiriting.\n"
@@ -882,12 +1303,15 @@ class SardobaBot:
                 return
             if not context.user_data.get('cashier_authenticated'):
                 context.user_data['cashier_pending_password'] = True
+                if text in CASHIER_MENU_TEXTS:
+                    self._set_cashier_resume_action(context, CASHIER_DIRECT_ACTIONS.get(text))
                 await update.message.reply_text("Parolni kiriting:")
                 return
             await self.handle_cashier_command(update, context, user)
 
     async def handle_image_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle image messages even if ConversationHandler state was lost."""
+        self._sync_opening_stage_with_media_group(update, context)
         flow = context.user_data.get('flow')
         if context.user_data.get('pending_payment_image'):
             await self.upload_payment_image(update, context)
@@ -1008,7 +1432,12 @@ class SardobaBot:
             await update.message.reply_text(msg)
             await self.show_cashier_menu(update, context)
 
-    async def _ensure_cashier_authenticated(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    async def _ensure_cashier_authenticated(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        resume_action: Optional[str] = None,
+    ) -> bool:
         """Kassir uchun parol o'rnatish/kirishni majburiy tekshiradi."""
         tg_id = update.effective_user.id
         user = await self.db.fetch_one(
@@ -1025,12 +1454,14 @@ class SardobaBot:
             context.user_data['cashier_set_password_confirm'] = False
             context.user_data['cashier_pending_password'] = False
             context.user_data['cashier_authenticated'] = False
+            self._set_cashier_resume_action(context, resume_action)
             await update.message.reply_text("Avval parol o'rnating. Yangi parol kiriting:")
             return False
 
         # Sessiya uchun parol kiritilmagan bo'lsa
         if not context.user_data.get('cashier_authenticated'):
             context.user_data['cashier_pending_password'] = True
+            self._set_cashier_resume_action(context, resume_action)
             await update.message.reply_text("Parolni kiriting:")
             return False
 
@@ -1038,9 +1469,17 @@ class SardobaBot:
 
     async def start_shift_opening(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Start the shift opening process"""
-        if not await self._ensure_cashier_authenticated(update, context):
+        if not await self._ensure_cashier_authenticated(update, context, resume_action="start_shift_opening"):
             return MAIN_MENU
         context.user_data.pop('blocked_media_group_id', None)
+        context.user_data['pending_opening_group_photos'] = []
+        context.user_data.pop("opening_stage_locked_media_group_id", None)
+        context.user_data.pop("opening_stage_locked_name", None)
+        context.user_data.pop("pending_next_opening_stage", None)
+        context.user_data.pop("opening_stage_completed_prompt_sent", None)
+        self._cancel_receipt_roll_finalize_task(context)
+        context.user_data.pop("receipt_roll_finalize_token", None)
+        context.user_data.pop("opening_finalize_done", None)
 
         lang = 'uz'
         user_row = await self.db.fetch_one("SELECT id FROM users WHERE telegram_id = %s", (update.effective_user.id,))
@@ -1076,10 +1515,7 @@ class SardobaBot:
     async def open_shift_amount(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Get the opening amount for the shift"""
         try:
-            raw = update.message.text
-            # Allow inputs like "12 300", "12,300", "12330 so'm"
-            digits = ''.join(ch for ch in raw if ch.isdigit() or ch in ['.', ','])
-            amount = float(digits.replace(',', '')) if digits else float(raw)
+            amount = self._parse_amount(update.message.text)
             context.user_data['opening_amount'] = amount
             context.user_data['opening_amount_time'] = self._format_telegram_time(getattr(update.message, "date", None))
             
@@ -1119,16 +1555,6 @@ class SardobaBot:
                     if shift:
                         context.user_data['current_shift_id'] = shift['id']
                         context.user_data['workplace_status_uploaded_ids'] = []
-
-                # Notify group about shift opening
-                loc_name = await self._get_location_name(location_id)
-                await self._send_group_message(
-                    context,
-                    f"Smena ochildi: {update.effective_user.first_name} {update.effective_user.last_name or ''}\n"
-                    f"Filial: {loc_name}\n"
-                    f"Ochish summasi: {amount}\n"
-                    f"Vaqt: {context.user_data.get('opening_amount_time','')}"
-                )
             except Exception:
                 context.user_data['flow'] = None
                 await update.message.reply_text("Xatolik: smena ma'lumotlarini saqlab bo'lmadi. Qayta urinib ko'ring.")
@@ -1149,7 +1575,7 @@ class SardobaBot:
             lang = 'uz'
             
             if lang == 'uz':
-                msg = "Iltimos, to'g'ri miqdor kiriting."
+                msg = self._invalid_amount_msg(context)
             else:
                 msg = "Р В Р’В Р РЋРЎСџР В Р’В Р РЋРІР‚СћР В Р’В Р вЂ™Р’В¶Р В Р’В Р вЂ™Р’В°Р В Р’В Р вЂ™Р’В»Р В Р Р‹Р РЋРІР‚СљР В Р’В Р Р†РІР‚С›РІР‚вЂњР В Р Р‹Р В РЎвЂњР В Р Р‹Р Р†Р вЂљРЎв„ўР В Р’В Р вЂ™Р’В°, Р В Р’В Р В РІР‚В Р В Р’В Р В РІР‚В Р В Р’В Р вЂ™Р’ВµР В Р’В Р СћРІР‚ВР В Р’В Р РЋРІР‚ВР В Р Р‹Р Р†Р вЂљРЎв„ўР В Р’В Р вЂ™Р’Вµ Р В Р’В Р РЋРІР‚вЂќР В Р Р‹Р В РІР‚С™Р В Р’В Р вЂ™Р’В°Р В Р’В Р В РІР‚В Р В Р’В Р РЋРІР‚ВР В Р’В Р вЂ™Р’В»Р В Р Р‹Р В Р вЂ°Р В Р’В Р В РІР‚В¦Р В Р Р‹Р РЋРІР‚СљР В Р Р‹Р В РІР‚в„– Р В Р Р‹Р В РЎвЂњР В Р Р‹Р РЋРІР‚СљР В Р’В Р РЋР’ВР В Р’В Р РЋР’ВР В Р Р‹Р РЋРІР‚Сљ."
                 
@@ -1203,6 +1629,17 @@ class SardobaBot:
         return OPEN_SHIFT_AMOUNT
     async def upload_workplace_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Upload workplace status image (2 ta rasm majburiy)."""
+        self._sync_opening_stage_with_media_group(update, context)
+        current_stage = context.user_data.get("opening_stage")
+        if current_stage and current_stage != "workplace_status":
+            if current_stage == "terminal_power":
+                return await self.upload_terminal_power(update, context)
+            if current_stage == "zero_report":
+                return await self.upload_zero_report(update, context)
+            if current_stage == "opening_notification":
+                return await self.upload_opening_notification(update, context)
+            if current_stage == "receipt_roll":
+                return await self.upload_receipt_roll(update, context)
         if self._is_blocked_media_group(update, context):
             return UPLOAD_WORKPLACE_STATUS
 
@@ -1235,8 +1672,12 @@ class SardobaBot:
 
         uploaded_ids.append(file_id)
         await self._save_shift_image(shift_id, 'workplace_status', file_id)
-        await self._send_group_shift_photo(
-            context, shift_id, file_id, "Ish joyi holati rasmi", event_time=getattr(update.message, "date", None)
+        self._queue_opening_group_photo(
+            context,
+            file_id,
+            "Ish joyi holati rasmi",
+            event_time=getattr(update.message, "date", None),
+            media_kind=self._get_image_media_kind(update),
         )
         context.user_data['workplace_status_uploaded_ids'] = uploaded_ids
 
@@ -1248,16 +1689,34 @@ class SardobaBot:
             context.user_data['opening_stage'] = 'workplace_status'
             return UPLOAD_WORKPLACE_STATUS
 
-        await update.message.reply_text("Rasmlar qabul qilindi (2/2).")
-        await update.message.reply_text(
-            "Terminallar va ratsiyalar quvvatini tekshiring va ularning quvvatlanish jarayonini rasmga oling."
-        )
+        if not self._is_stage_prompted(context, "workplace_status"):
+            await update.message.reply_text("Rasmlar qabul qilindi (2/2).")
+            await update.message.reply_text(
+                "Terminallar va ratsiyalar quvvatini tekshiring va ularning quvvatlanish jarayonini rasmga oling."
+            )
+            self._mark_stage_prompted(context, "workplace_status")
+
+        if self._lock_opening_stage_for_media_group(update, context, "workplace_status", "terminal_power"):
+            return UPLOAD_WORKPLACE_STATUS
+
         self._block_current_media_group(update, context)
+        self._clear_stage_prompted(context, "workplace_status")
         context.user_data['opening_stage'] = 'terminal_power'
         return UPLOAD_TERMINAL_POWER
 
     async def upload_terminal_power(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Upload terminal power image."""
+        self._sync_opening_stage_with_media_group(update, context)
+        current_stage = context.user_data.get("opening_stage")
+        if current_stage and current_stage != "terminal_power":
+            if current_stage == "workplace_status":
+                return await self.upload_workplace_status(update, context)
+            if current_stage == "zero_report":
+                return await self.upload_zero_report(update, context)
+            if current_stage == "opening_notification":
+                return await self.upload_opening_notification(update, context)
+            if current_stage == "receipt_roll":
+                return await self.upload_receipt_roll(update, context)
         if self._is_blocked_media_group(update, context):
             return UPLOAD_TERMINAL_POWER
 
@@ -1270,18 +1729,38 @@ class SardobaBot:
         shift_id = context.user_data.get('current_shift_id')
         if shift_id:
             await self._save_shift_image(shift_id, 'terminal_power', file_id)
-            await self._send_group_shift_photo(
-                context, shift_id, file_id, "Terminal/ratsiya quvvat holati", event_time=getattr(update.message, "date", None)
+            self._queue_opening_group_photo(
+                context,
+                file_id,
+                "Terminal/ratsiya quvvat holati",
+                event_time=getattr(update.message, "date", None),
+                media_kind=self._get_image_media_kind(update),
             )
 
-        await update.message.reply_text("Rasm qabul qilindi.")
-        await update.message.reply_text("Uzcard va Humo kartalaridagi nol hisobotni chiqaring va rasmga oling.")
+        if not self._is_stage_prompted(context, "terminal_power"):
+            await update.message.reply_text("Rasm qabul qilindi.")
+            await update.message.reply_text("Uzcard va Humo kartalaridagi nol hisobotni chiqaring va rasmga oling.")
+            self._mark_stage_prompted(context, "terminal_power")
+        if self._lock_opening_stage_for_media_group(update, context, "terminal_power", "zero_report"):
+            return UPLOAD_TERMINAL_POWER
         self._block_current_media_group(update, context)
+        self._clear_stage_prompted(context, "terminal_power")
         context.user_data['opening_stage'] = 'zero_report'
         return UPLOAD_ZERO_REPORT
 
     async def upload_zero_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Upload zero report image."""
+        self._sync_opening_stage_with_media_group(update, context)
+        current_stage = context.user_data.get("opening_stage")
+        if current_stage and current_stage != "zero_report":
+            if current_stage == "workplace_status":
+                return await self.upload_workplace_status(update, context)
+            if current_stage == "terminal_power":
+                return await self.upload_terminal_power(update, context)
+            if current_stage == "opening_notification":
+                return await self.upload_opening_notification(update, context)
+            if current_stage == "receipt_roll":
+                return await self.upload_receipt_roll(update, context)
         if self._is_blocked_media_group(update, context):
             return UPLOAD_ZERO_REPORT
 
@@ -1294,18 +1773,38 @@ class SardobaBot:
         shift_id = context.user_data.get('current_shift_id')
         if shift_id:
             await self._save_shift_image(shift_id, 'zero_report', file_id)
-            await self._send_group_shift_photo(
-                context, shift_id, file_id, "Uzcard/Humo nol hisobot", event_time=getattr(update.message, "date", None)
+            self._queue_opening_group_photo(
+                context,
+                file_id,
+                "Uzcard/Humo nol hisobot",
+                event_time=getattr(update.message, "date", None),
+                media_kind=self._get_image_media_kind(update),
             )
 
-        await update.message.reply_text("Rasm qabul qilindi.")
-        await update.message.reply_text("Iiko va soliq check tizimlarida smenani oching. Ochilganlik haqidagi bildirishnomani rasmga oling.")
+        if not self._is_stage_prompted(context, "zero_report"):
+            await update.message.reply_text("Rasm qabul qilindi.")
+            await update.message.reply_text("Iiko va soliq check tizimlarida smenani oching. Ochilganlik haqidagi bildirishnomani rasmga oling.")
+            self._mark_stage_prompted(context, "zero_report")
+        if self._lock_opening_stage_for_media_group(update, context, "zero_report", "opening_notification"):
+            return UPLOAD_ZERO_REPORT
         self._block_current_media_group(update, context)
+        self._clear_stage_prompted(context, "zero_report")
         context.user_data['opening_stage'] = 'opening_notification'
         return UPLOAD_OPENING_NOTIFICATION
 
     async def upload_opening_notification(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Upload opening notification image."""
+        self._sync_opening_stage_with_media_group(update, context)
+        current_stage = context.user_data.get("opening_stage")
+        if current_stage and current_stage != "opening_notification":
+            if current_stage == "workplace_status":
+                return await self.upload_workplace_status(update, context)
+            if current_stage == "terminal_power":
+                return await self.upload_terminal_power(update, context)
+            if current_stage == "zero_report":
+                return await self.upload_zero_report(update, context)
+            if current_stage == "receipt_roll":
+                return await self.upload_receipt_roll(update, context)
         if self._is_blocked_media_group(update, context):
             return UPLOAD_OPENING_NOTIFICATION
 
@@ -1318,18 +1817,28 @@ class SardobaBot:
         shift_id = context.user_data.get('current_shift_id')
         if shift_id:
             await self._save_shift_image(shift_id, 'opening_notification', file_id)
-            await self._send_group_shift_photo(
-                context, shift_id, file_id, "iiko/soliq ochilish bildirishnomasi", event_time=getattr(update.message, "date", None)
+            self._queue_opening_group_photo(
+                context,
+                file_id,
+                "iiko/soliq ochilish bildirishnomasi",
+                event_time=getattr(update.message, "date", None),
+                media_kind=self._get_image_media_kind(update),
             )
 
-        await update.message.reply_text("Rasm qabul qilindi.")
-        await update.message.reply_text("Zaxira chek lentalari mavjudligini rasm bilan jo'nating.")
+        if not self._is_stage_prompted(context, "opening_notification"):
+            await update.message.reply_text("Rasm qabul qilindi.")
+            await update.message.reply_text("Zaxira chek lentalari mavjudligini rasm bilan jo'nating.")
+            self._mark_stage_prompted(context, "opening_notification")
+        if self._lock_opening_stage_for_media_group(update, context, "opening_notification", "receipt_roll"):
+            return UPLOAD_OPENING_NOTIFICATION
         self._block_current_media_group(update, context)
+        self._clear_stage_prompted(context, "opening_notification")
         context.user_data['opening_stage'] = 'receipt_roll'
         return UPLOAD_RECEIPT_ROLL
 
     async def upload_receipt_roll(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Upload receipt roll image and finish shift opening flow."""
+        self._sync_opening_stage_with_media_group(update, context)
         if self._is_blocked_media_group(update, context):
             return UPLOAD_RECEIPT_ROLL
 
@@ -1342,22 +1851,42 @@ class SardobaBot:
         shift_id = context.user_data.get('current_shift_id')
         if shift_id:
             await self._save_shift_image(shift_id, 'receipt_roll', file_id)
-            await self._send_group_shift_photo(
-                context, shift_id, file_id, "Zaxira chek lenta rasmi", event_time=getattr(update.message, "date", None)
+            self._queue_opening_group_photo(
+                context,
+                file_id,
+                "Zaxira chek lenta rasmi",
+                event_time=getattr(update.message, "date", None),
+                media_kind=self._get_image_media_kind(update),
             )
 
         await update.message.reply_text("Rasm qabul qilindi.")
-        await update.message.reply_text("Smena muvaffaqiyatli ochildi! Endi sverka jarayonini boshlang.")
+        media_group_id = getattr(update.message, "media_group_id", None)
+        if media_group_id:
+            context.user_data['opening_stage'] = 'receipt_roll'
+            self._schedule_receipt_roll_finalize(
+                context,
+                chat_id=update.effective_chat.id,
+                cashier_first_name=update.effective_user.first_name,
+                cashier_last_name=update.effective_user.last_name,
+            )
+            return UPLOAD_RECEIPT_ROLL
+
         self._block_current_media_group(update, context)
-        await self.show_cashier_menu(update, context)
-        context.user_data['flow'] = None
-        context.user_data.pop('opening_stage', None)
+        await self._finalize_shift_opening_flow(
+            context,
+            chat_id=update.effective_chat.id,
+            cashier_first_name=update.effective_user.first_name,
+            cashier_last_name=update.effective_user.last_name,
+        )
         return MAIN_MENU
 
     async def start_daily_reporting(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Start the daily reporting process"""
-        if not await self._ensure_cashier_authenticated(update, context):
+        if not await self._ensure_cashier_authenticated(update, context, resume_action="start_daily_reporting"):
             return MAIN_MENU
+        self._clear_debt_received_detail_state(context)
+        self._clear_debt_payments_detail_state(context)
+        self._clear_expense_detail_state(context)
 
         # Check if there's an active shift
         user_row = await self.db.fetch_one("SELECT id FROM users WHERE telegram_id = %s", (update.effective_user.id,))
@@ -1414,9 +1943,11 @@ class SardobaBot:
         """Get sales amount"""
         try:
             amount = self._parse_amount(update.message.text)
+            context.user_data['sales_amount'] = amount
+            context.user_data.pop("sales_amount_detail_stage", None)
+            context.user_data.pop("sales_amount_payment_type", None)
             context.user_data.pop('pending_sverka_key', None)
             context.user_data.pop('pending_sverka_state', None)
-            context.user_data['sales_amount'] = amount
             self._mark_sverka_done(context, 'sales_amount')
             return await self._after_sverka_step(update, context)
         except ValueError:
@@ -1425,26 +1956,137 @@ class SardobaBot:
 
     async def report_debt_received(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Get received debts amount"""
-        try:
-            amount = self._parse_amount(update.message.text)
+        stage = context.user_data.get("debt_received_detail_stage")
+        if stage == "counterparty_name":
+            name = (update.message.text or "").strip()
+            if not name:
+                await update.message.reply_text("Kimdan kelganini kiriting (ism).")
+                return REPORT_DEBT_RECEIVED
+            context.user_data["debt_received_counterparty_name"] = name
+            context.user_data["debt_received_detail_stage"] = "counterparty_phone"
+            await update.message.reply_text("Telefon raqamini kiriting.")
+            return REPORT_DEBT_RECEIVED
+        if stage == "counterparty_phone":
+            phone = (update.message.text or "").strip()
+            if not validate_phone_number(phone):
+                await update.message.reply_text("Iltimos, to'g'ri telefon raqamini kiriting.")
+                return REPORT_DEBT_RECEIVED
+            context.user_data["debt_received_counterparty_phone"] = phone
+            context.user_data["debt_received_detail_stage"] = "payment_type"
+            await update.message.reply_text(
+                "Kelgan qarz uchun to'lov turini tanlang.",
+                reply_markup=self._build_expense_payment_type_keyboard(),
+            )
+            return REPORT_DEBT_RECEIVED
+        if stage == "payment_type":
+            payment_type = self._normalize_payment_type(update.message.text)
+            if not payment_type:
+                await update.message.reply_text(
+                    "Iltimos, to'lov turini tugmalardan tanlang.",
+                    reply_markup=self._build_expense_payment_type_keyboard(),
+                )
+                return REPORT_DEBT_RECEIVED
+            context.user_data["debt_received_payment_type"] = payment_type
+            context.user_data.pop("debt_received_detail_stage", None)
             context.user_data.pop('pending_sverka_key', None)
             context.user_data.pop('pending_sverka_state', None)
-            context.user_data['debt_received'] = amount
             self._mark_sverka_done(context, 'debt_received')
+            await update.message.reply_text("To'lov turi qabul qilindi.", reply_markup=ReplyKeyboardRemove())
             return await self._after_sverka_step(update, context)
+
+        try:
+            amount = self._parse_amount(update.message.text)
+            context.user_data['debt_received'] = amount
+            if amount <= 0:
+                self._clear_debt_received_detail_state(context)
+                context.user_data.pop('pending_sverka_key', None)
+                context.user_data.pop('pending_sverka_state', None)
+                self._mark_sverka_done(context, 'debt_received')
+                return await self._after_sverka_step(update, context)
+
+            self._clear_debt_received_detail_state(context)
+            context.user_data["debt_received_detail_stage"] = "counterparty_name"
+            await update.message.reply_text("Kelgan qarz kimdan keldi? Ismini kiriting.")
+            return REPORT_DEBT_RECEIVED
+
         except ValueError:
             await update.message.reply_text(self._invalid_amount_msg(context))
             return REPORT_DEBT_RECEIVED
 
     async def report_expenses(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Get expenses amount"""
-        try:
-            amount = self._parse_amount(update.message.text)
+        stage = context.user_data.get("expense_detail_stage")
+        if stage == "payment_type":
+            payment_type = self._normalize_payment_type(update.message.text)
+            if not payment_type:
+                await update.message.reply_text(
+                    "Iltimos, to'lov turini tugmalardan tanlang.",
+                    reply_markup=self._build_expense_payment_type_keyboard(),
+                )
+                return REPORT_EXPENSES
+            context.user_data["expense_payment_type"] = payment_type
+            context.user_data["expense_detail_stage"] = "paid_to"
+            await update.message.reply_text(
+                "Kimga berildi? Masalan: yetkazib beruvchi, xodim, kuryer.",
+                reply_markup=ReplyKeyboardRemove(),
+            )
+            return REPORT_EXPENSES
+        if stage == "paid_to":
+            paid_to = (update.message.text or "").strip()
+            if not paid_to:
+                await update.message.reply_text("Kimga berilganini kiriting.")
+                return REPORT_EXPENSES
+            context.user_data["expense_paid_to"] = paid_to
+            context.user_data["expense_detail_stage"] = "recipient_name"
+            await update.message.reply_text("Qabul qiluvchining ismini kiriting.")
+            return REPORT_EXPENSES
+        if stage == "recipient_name":
+            recipient_name = (update.message.text or "").strip()
+            if not recipient_name:
+                await update.message.reply_text("Qabul qiluvchining ismini kiriting.")
+                return REPORT_EXPENSES
+            context.user_data["expense_recipient_name"] = recipient_name
+            context.user_data["expense_detail_stage"] = "recipient_phone"
+            await update.message.reply_text("Qabul qiluvchining telefon raqamini kiriting.")
+            return REPORT_EXPENSES
+        if stage == "recipient_phone":
+            phone = (update.message.text or "").strip()
+            if not validate_phone_number(phone):
+                await update.message.reply_text("Iltimos, to'g'ri telefon raqamini kiriting.")
+                return REPORT_EXPENSES
+            context.user_data["expense_recipient_phone"] = phone
+            context.user_data["expense_detail_stage"] = "reason"
+            await update.message.reply_text("Chiqim sababini kiriting.")
+            return REPORT_EXPENSES
+        if stage == "reason":
+            reason = (update.message.text or "").strip()
+            if not reason:
+                await update.message.reply_text("Chiqim sababini kiriting.")
+                return REPORT_EXPENSES
+            context.user_data["expense_reason"] = reason
             context.user_data.pop('pending_sverka_key', None)
             context.user_data.pop('pending_sverka_state', None)
-            context.user_data['expenses'] = amount
+            context.user_data.pop("expense_detail_stage", None)
             self._mark_sverka_done(context, 'expenses')
             return await self._after_sverka_step(update, context)
+
+        try:
+            amount = self._parse_amount(update.message.text)
+            context.user_data['expenses'] = amount
+            if amount <= 0:
+                self._clear_expense_detail_state(context)
+                context.user_data.pop('pending_sverka_key', None)
+                context.user_data.pop('pending_sverka_state', None)
+                self._mark_sverka_done(context, 'expenses')
+                return await self._after_sverka_step(update, context)
+
+            self._clear_expense_detail_state(context)
+            context.user_data["expense_detail_stage"] = "payment_type"
+            await update.message.reply_text(
+                "Chiqim mavjud. To'lov turini tanlang.",
+                reply_markup=self._build_expense_payment_type_keyboard(),
+            )
+            return REPORT_EXPENSES
         except ValueError:
             await update.message.reply_text(self._invalid_amount_msg(context))
             return REPORT_EXPENSES
@@ -1503,45 +2145,139 @@ class SardobaBot:
 
     async def report_other_payments(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Get other payments amount"""
-        try:
-            amount = self._parse_amount(update.message.text)
+        if context.user_data.get("other_payments_detail_stage") == "payment_type":
+            payment_type = self._normalize_payment_type(update.message.text)
+            if not payment_type:
+                await update.message.reply_text(
+                    "Iltimos, to'lov turini tugmalardan tanlang.",
+                    reply_markup=self._build_expense_payment_type_keyboard(),
+                )
+                return REPORT_OTHER_PAYMENTS
+            context.user_data["other_payments_payment_type"] = payment_type
+            context.user_data.pop("other_payments_detail_stage", None)
             context.user_data.pop('pending_sverka_key', None)
             context.user_data.pop('pending_sverka_state', None)
-            context.user_data['other_payments'] = amount
             self._mark_sverka_done(context, 'other_payments')
+            await update.message.reply_text("To'lov turi qabul qilindi.", reply_markup=ReplyKeyboardRemove())
             return await self._after_sverka_step(update, context)
+        try:
+            amount = self._parse_amount(update.message.text)
+            context.user_data['other_payments'] = amount
+            if amount <= 0:
+                context.user_data.pop("other_payments_detail_stage", None)
+                context.user_data.pop("other_payments_payment_type", None)
+                context.user_data.pop('pending_sverka_key', None)
+                context.user_data.pop('pending_sverka_state', None)
+                self._mark_sverka_done(context, 'other_payments')
+                return await self._after_sverka_step(update, context)
+            context.user_data.pop("other_payments_payment_type", None)
+            context.user_data["other_payments_detail_stage"] = "payment_type"
+            await update.message.reply_text(
+                "Boshqa to'lovlar uchun to'lov turini tanlang.",
+                reply_markup=self._build_expense_payment_type_keyboard(),
+            )
+            return REPORT_OTHER_PAYMENTS
         except ValueError:
             await update.message.reply_text(self._invalid_amount_msg(context))
             return REPORT_OTHER_PAYMENTS
 
     async def report_debt_payments(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Get debt payments amount"""
-        try:
-            amount = self._parse_amount(update.message.text)
+        stage = context.user_data.get("debt_payments_detail_stage")
+        if stage == "counterparty_name":
+            name = (update.message.text or "").strip()
+            if not name:
+                await update.message.reply_text("Kimga berilganini kiriting (ism).")
+                return REPORT_DEBT_PAYMENTS
+            context.user_data["debt_payments_counterparty_name"] = name
+            context.user_data["debt_payments_detail_stage"] = "counterparty_phone"
+            await update.message.reply_text("Telefon raqamini kiriting.")
+            return REPORT_DEBT_PAYMENTS
+        if stage == "counterparty_phone":
+            phone = (update.message.text or "").strip()
+            if not validate_phone_number(phone):
+                await update.message.reply_text("Iltimos, to'g'ri telefon raqamini kiriting.")
+                return REPORT_DEBT_PAYMENTS
+            context.user_data["debt_payments_counterparty_phone"] = phone
+            context.user_data["debt_payments_detail_stage"] = "payment_type"
+            await update.message.reply_text(
+                "Qarzga berilgan to'lovlar uchun to'lov turini tanlang.",
+                reply_markup=self._build_expense_payment_type_keyboard(),
+            )
+            return REPORT_DEBT_PAYMENTS
+        if stage == "payment_type":
+            payment_type = self._normalize_payment_type(update.message.text)
+            if not payment_type:
+                await update.message.reply_text(
+                    "Iltimos, to'lov turini tugmalardan tanlang.",
+                    reply_markup=self._build_expense_payment_type_keyboard(),
+                )
+                return REPORT_DEBT_PAYMENTS
+            context.user_data["debt_payments_payment_type"] = payment_type
+            context.user_data.pop("debt_payments_detail_stage", None)
             context.user_data.pop('pending_sverka_key', None)
             context.user_data.pop('pending_sverka_state', None)
-            context.user_data['debt_payments'] = amount
             self._mark_sverka_done(context, 'debt_payments')
+            await update.message.reply_text("To'lov turi qabul qilindi.", reply_markup=ReplyKeyboardRemove())
             return await self._after_sverka_step(update, context)
+        try:
+            amount = self._parse_amount(update.message.text)
+            context.user_data['debt_payments'] = amount
+            if amount <= 0:
+                self._clear_debt_payments_detail_state(context)
+                context.user_data.pop('pending_sverka_key', None)
+                context.user_data.pop('pending_sverka_state', None)
+                self._mark_sverka_done(context, 'debt_payments')
+                return await self._after_sverka_step(update, context)
+            self._clear_debt_payments_detail_state(context)
+            context.user_data["debt_payments_detail_stage"] = "counterparty_name"
+            await update.message.reply_text("Qarz to'lovi kimga berildi? Ismini kiriting.")
+            return REPORT_DEBT_PAYMENTS
         except ValueError:
             await update.message.reply_text(self._invalid_amount_msg(context))
             return REPORT_DEBT_PAYMENTS
 
     async def report_debt_refunds(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Get debt refunds amount"""
-        try:
-            amount = self._parse_amount(update.message.text)
+        if context.user_data.get("debt_refunds_detail_stage") == "payment_type":
+            payment_type = self._normalize_payment_type(update.message.text)
+            if not payment_type:
+                await update.message.reply_text(
+                    "Iltimos, to'lov turini tugmalardan tanlang.",
+                    reply_markup=self._build_expense_payment_type_keyboard(),
+                )
+                return REPORT_DEBT_REFUNDS
+            context.user_data["debt_refunds_payment_type"] = payment_type
+            context.user_data.pop("debt_refunds_detail_stage", None)
             context.user_data.pop('pending_sverka_key', None)
             context.user_data.pop('pending_sverka_state', None)
-            context.user_data['debt_refunds'] = amount
             self._mark_sverka_done(context, 'debt_refunds')
+            await update.message.reply_text("To'lov turi qabul qilindi.", reply_markup=ReplyKeyboardRemove())
             return await self._after_sverka_step(update, context)
+        try:
+            amount = self._parse_amount(update.message.text)
+            context.user_data['debt_refunds'] = amount
+            if amount <= 0:
+                context.user_data.pop("debt_refunds_detail_stage", None)
+                context.user_data.pop("debt_refunds_payment_type", None)
+                context.user_data.pop('pending_sverka_key', None)
+                context.user_data.pop('pending_sverka_state', None)
+                self._mark_sverka_done(context, 'debt_refunds')
+                return await self._after_sverka_step(update, context)
+            context.user_data.pop("debt_refunds_payment_type", None)
+            context.user_data["debt_refunds_detail_stage"] = "payment_type"
+            await update.message.reply_text(
+                "Vozvrat qarzlar uchun to'lov turini tanlang.",
+                reply_markup=self._build_expense_payment_type_keyboard(),
+            )
+            return REPORT_DEBT_REFUNDS
         except ValueError:
             await update.message.reply_text(self._invalid_amount_msg(context))
             return REPORT_DEBT_REFUNDS
     async def save_daily_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Save the daily report to the database"""
         shift_id = context.user_data['current_shift_id']
+        report_data_json = json.dumps(self._build_report_data_payload(context), ensure_ascii=False)
         
         report_data = {
             'shift_id': shift_id,
@@ -1555,7 +2291,8 @@ class SardobaBot:
             'humo_refund': context.user_data.get('humo_refund', 0),
             'other_payments': context.user_data.get('other_payments', 0),
             'debt_payments': context.user_data.get('debt_payments', 0),
-            'debt_refunds': context.user_data.get('debt_refunds', 0)
+            'debt_refunds': context.user_data.get('debt_refunds', 0),
+            'report_data': report_data_json,
         }
         
         existing_report = await self.db.fetch_one(
@@ -1582,7 +2319,8 @@ class SardobaBot:
                     humo_refund = %(humo_refund)s,
                     other_payments = %(other_payments)s,
                     debt_payments = %(debt_payments)s,
-                    debt_refunds = %(debt_refunds)s
+                    debt_refunds = %(debt_refunds)s,
+                    report_data = %(report_data)s::jsonb
                 WHERE id = %(id)s
             """
         else:
@@ -1590,20 +2328,46 @@ class SardobaBot:
                 INSERT INTO reports (
                     shift_id, report_type, sales_amount, debt_received, expenses,
                     uzcard_amount, humo_amount, uzcard_refund, humo_refund,
-                    other_payments, debt_payments, debt_refunds
+                    other_payments, debt_payments, debt_refunds, report_data
                 ) VALUES (
                     %(shift_id)s, %(report_type)s, %(sales_amount)s, %(debt_received)s, %(expenses)s,
                     %(uzcard_amount)s, %(humo_amount)s, %(uzcard_refund)s, %(humo_refund)s,
-                    %(other_payments)s, %(debt_payments)s, %(debt_refunds)s
+                    %(other_payments)s, %(debt_payments)s, %(debt_refunds)s, %(report_data)s::jsonb
                 )
             """
         await self.db.execute_query(query, report_data)
         # Muhim: guruhga bitta yakuniy fayl faqat smena yopilganda yuboriladi.
         # Shu sababli bu yerda alohida sverka fayl yubormaymiz.
 
+    async def _finalize_sverka(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await self.save_daily_report(update, context)
+
+        shift_id = context.user_data.get("current_shift_id")
+        if shift_id:
+            try:
+                shift_summary = await self._get_shift_summary(shift_id) or {}
+                await self._send_group_message(context, self._build_sverka_summary_message(shift_summary))
+            except Exception:
+                logger.exception("sverka group send failed")
+
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="Sverka yakunlandi! Barcha hisobotlar saqlandi.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await self.show_cashier_menu(update, context)
+        context.user_data['flow'] = None
+        context.user_data.pop('pending_sverka_key', None)
+        context.user_data.pop('pending_sverka_state', None)
+        self._clear_debt_received_detail_state(context)
+        self._clear_debt_payments_detail_state(context)
+        self._clear_expense_detail_state(context)
+        self._clear_generic_payment_method_state(context)
+        return MAIN_MENU
+
     async def start_shift_closing(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Start the shift closing process"""
-        if not await self._ensure_cashier_authenticated(update, context):
+        if not await self._ensure_cashier_authenticated(update, context, resume_action="start_shift_closing"):
             return MAIN_MENU
 
         lang = 'uz'
@@ -1645,12 +2409,13 @@ class SardobaBot:
                 missing.append("Uzcard rasmi")
             if humo_img < 1:
                 missing.append("Humo rasmi")
+            context.user_data["awaiting_payment_images_for_close"] = True
             await update.message.reply_text(
                 "Smenani yopishdan oldin quyidagilar majburiy:\n- "
                 + "\n- ".join(missing)
-                + "\n\n`Rasm jo'natish` tugmasini bosib, Uzcard va Humo rasmlarini yuboring."
+                + "\n\nQuyida qaysi rasm yetishmayotgan bo'lsa, uni birinchi tanlang."
             )
-            return MAIN_MENU
+            return await self.start_payment_image_upload(update, context)
 
         if lang == 'uz':
             msg = "Smenani yopish uchun yakuniy summani kiriting:"
@@ -1663,7 +2428,7 @@ class SardobaBot:
 
     async def start_payment_image_upload(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Ask cashier to choose Uzcard or Humo and then upload image"""
-        if not await self._ensure_cashier_authenticated(update, context):
+        if not await self._ensure_cashier_authenticated(update, context, resume_action="start_payment_image_upload"):
             return MAIN_MENU
         context.user_data.pop('blocked_media_group_id', None)
 
@@ -1686,9 +2451,9 @@ class SardobaBot:
 
         text = "Qaysi turdagi rasm yuborasiz?" if lang == 'uz' else "Qaysi turdagi rasm yuborasiz?"
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Uzcard", callback_data="payimg:uzcard")],
-            [InlineKeyboardButton("Humo", callback_data="payimg:humo")],
-            [InlineKeyboardButton("Orqaga", callback_data="payimg:back")],
+            [InlineKeyboardButton("💳 Uzcard", callback_data="payimg:uzcard")],
+            [InlineKeyboardButton("💳 Humo", callback_data="payimg:humo")],
+            [InlineKeyboardButton("⬅️ Orqaga", callback_data="payimg:back")],
         ])
         await update.message.reply_text(text, reply_markup=keyboard)
         return SELECT_PAYMENT_IMAGE
@@ -1748,13 +2513,30 @@ class SardobaBot:
                 await self._send_group_shift_photo(
                     context, shift_id, file_id, "Uzcard hisobot rasmi", event_time=getattr(update.message, "date", None)
                 )
+                shift_meta = await self._get_shift_meta(shift_id)
+                await self._send_group_message(
+                    context,
+                    self._build_payment_image_uploaded_message(
+                        "Uzcard hisobot rasmi",
+                        shift_meta,
+                        getattr(update.message, "date", None),
+                    ),
+                )
             else:
                 await self._send_group_shift_photo(
                     context, shift_id, file_id, "Humo hisobot rasmi", event_time=getattr(update.message, "date", None)
                 )
+                shift_meta = await self._get_shift_meta(shift_id)
+                await self._send_group_message(
+                    context,
+                    self._build_payment_image_uploaded_message(
+                        "Humo hisobot rasmi",
+                        shift_meta,
+                        getattr(update.message, "date", None),
+                    ),
+                )
 
             context.user_data.pop('pending_payment_image', None)
-            context.user_data['flow'] = None
             self._block_current_media_group(update, context)
             if key == 'uzcard':
                 await update.message.reply_text("Uzcard hisobot rasmingiz qabul qilindi.")
@@ -1763,13 +2545,29 @@ class SardobaBot:
 
             uzcard_img = await self._count_shift_images(shift_id, 'uzcard_payment')
             humo_img = await self._count_shift_images(shift_id, 'humo_payment')
-            if uzcard_img >= 1 and humo_img >= 1:
-                await update.message.reply_text("Uzcard va Humo rasmlari to'liq qabul qilindi.")
+            if uzcard_img < 1 or humo_img < 1:
+                missing_key = "uzcard" if uzcard_img < 1 else "humo"
+                missing_label = "Uzcard" if missing_key == "uzcard" else "Humo"
+                context.user_data['pending_payment_image'] = missing_key
+                context.user_data['flow'] = 'payment_image'
+                await update.message.reply_text(f"{missing_label} rasmini ham yuboring.")
+                return UPLOAD_PAYMENT_IMAGE
+
+            await update.message.reply_text("Uzcard va Humo rasmlari to'liq qabul qilindi.")
+            if context.user_data.pop("awaiting_payment_images_for_close", False):
+                context.user_data['flow'] = 'closing'
+                await update.message.reply_text(
+                    "Rasmlar qabul qilindi. Endi smenani yopish uchun yakuniy summani kiriting:"
+                )
+                return CLOSE_SHIFT
+
+            context.user_data['flow'] = None
             await self.show_cashier_menu(update, context)
             return MAIN_MENU
         except Exception:
             logger.exception("upload_payment_image failed")
             context.user_data.pop('pending_payment_image', None)
+            context.user_data.pop("awaiting_payment_images_for_close", None)
             context.user_data['flow'] = None
             await update.message.reply_text("Rasmni saqlashda xatolik bo'ldi. Qayta urinib ko'ring.")
             await self.show_cashier_menu(update, context)
@@ -1837,7 +2635,7 @@ class SardobaBot:
                 row = []
         if row:
             keyboard.append(row)
-        keyboard.append([InlineKeyboardButton("Orqaga", callback_data="edit:back")])
+        keyboard.append([InlineKeyboardButton("⬅️ Orqaga", callback_data="edit:back")])
 
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -1887,10 +2685,40 @@ class SardobaBot:
         self._mark_sverka_done(context, key)
 
         report_id = context.user_data.get('edit_report_id')
+        shift_id = context.user_data.get('current_shift_id')
         if report_id:
             await self.db.execute_query(
                 f"UPDATE reports SET {key}=%s WHERE id=%s",
                 (amount, report_id)
+            )
+            if not shift_id:
+                report_row = await self.db.fetch_one("SELECT shift_id FROM reports WHERE id=%s", (report_id,))
+                shift_id = report_row.get("shift_id") if report_row else None
+
+            labels = self._sverka_payment_method_labels()
+            field_label = labels.get(key)
+            if not field_label:
+                for cfg_key, label_uz, *_ in self._sverka_config():
+                    if cfg_key == key:
+                        field_label = label_uz
+                        break
+            field_label = field_label or key
+
+            cashier_name = f"{update.effective_user.first_name} {update.effective_user.last_name or ''}".strip()
+            location_name = "-"
+            if shift_id:
+                shift_meta = await self._get_shift_meta(int(shift_id))
+                cashier_name = shift_meta.get("cashier") or cashier_name
+                location_name = shift_meta.get("location") or "-"
+            await self._send_group_message(
+                context,
+                self._build_report_edit_success_message(
+                    cashier_name,
+                    location_name,
+                    field_label,
+                    amount,
+                    event_time=getattr(update.message, "date", None),
+                ),
             )
 
         await update.message.reply_text("Saqlab qo'yildi.")
@@ -1937,7 +2765,7 @@ class SardobaBot:
         chat_id: int = None,
     ):
         locations = await self._get_locations()
-        keyboard = [[InlineKeyboardButton("Barcha filiallar", callback_data=f"reploc:all:{period}")]]
+        keyboard = [[InlineKeyboardButton("🌐 Barcha filiallar", callback_data=f"reploc:all:{period}")]]
         for loc in locations:
             keyboard.append([InlineKeyboardButton(loc["name"], callback_data=f"reploc:{loc['id']}:{period}")])
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1958,7 +2786,7 @@ class SardobaBot:
 
         _, loc_raw, period = parts
         location_id = None if loc_raw == "all" else int(loc_raw)
-        today = datetime.now().date()
+        today = self._now_tashkent().date()
 
         if period == "daily":
             start, end = today, today
@@ -2215,7 +3043,7 @@ class SardobaBot:
         meta.append(["Boshlanish", str(start)])
         meta.append(["Tugash", str(end)])
         meta.append(["Filial", location_name or "Barcha filiallar"])
-        meta.append(["Yaratilgan vaqt", datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+        meta.append(["Yaratilgan vaqt", self._now_tashkent().strftime("%Y-%m-%d %H:%M:%S")])
 
         out = BytesIO()
         wb.save(out)
@@ -2470,7 +3298,7 @@ class SardobaBot:
 
     async def _today_shift_for_user(self, user_id: int):
         """Foydalanuvchining bugungi (ochilgan sanasi bugun bo'lgan) oxirgi smenasi."""
-        today = datetime.now().date().isoformat()
+        today = self._now_tashkent().date().isoformat()
         start_bound, end_bound = self._day_bounds(today)
         return await self.db.fetch_one(
             """
@@ -2514,6 +3342,260 @@ class SardobaBot:
         media_group_id = getattr(msg, "media_group_id", None)
         if media_group_id:
             context.user_data["blocked_media_group_id"] = str(media_group_id)
+
+    def _sync_opening_stage_with_media_group(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        Keep opening stage on the same question while one media-group is still arriving.
+        This lets us accept all images from the same album (including duplicates).
+        """
+        locked_group_id = context.user_data.get("opening_stage_locked_media_group_id")
+        if not locked_group_id:
+            return
+
+        msg = update.message
+        current_group_id = getattr(msg, "media_group_id", None) if msg else None
+        locked_stage_name = context.user_data.get("opening_stage_locked_name")
+        if current_group_id and str(current_group_id) == str(locked_group_id):
+            if locked_stage_name:
+                context.user_data["opening_stage"] = locked_stage_name
+            return
+
+        next_stage = context.user_data.get("pending_next_opening_stage")
+        if next_stage:
+            context.user_data["opening_stage"] = next_stage
+        context.user_data.pop("opening_stage_locked_media_group_id", None)
+        context.user_data.pop("opening_stage_locked_name", None)
+        context.user_data.pop("pending_next_opening_stage", None)
+        context.user_data.pop("opening_stage_completed_prompt_sent", None)
+
+    def _lock_opening_stage_for_media_group(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        current_stage: str,
+        next_stage: str,
+    ) -> bool:
+        msg = update.message
+        media_group_id = getattr(msg, "media_group_id", None) if msg else None
+        if not media_group_id:
+            return False
+        context.user_data["opening_stage_locked_media_group_id"] = str(media_group_id)
+        context.user_data["opening_stage_locked_name"] = current_stage
+        context.user_data["pending_next_opening_stage"] = next_stage
+        context.user_data["opening_stage"] = current_stage
+        return True
+
+    def _stage_prompt_once_key(self, stage: str) -> str:
+        return f"{stage}:prompted"
+
+    def _mark_stage_prompted(self, context: ContextTypes.DEFAULT_TYPE, stage: str) -> None:
+        prompted = context.user_data.get("opening_stage_completed_prompt_sent")
+        if not isinstance(prompted, dict):
+            prompted = {}
+        prompted[self._stage_prompt_once_key(stage)] = True
+        context.user_data["opening_stage_completed_prompt_sent"] = prompted
+
+    def _is_stage_prompted(self, context: ContextTypes.DEFAULT_TYPE, stage: str) -> bool:
+        prompted = context.user_data.get("opening_stage_completed_prompt_sent")
+        if not isinstance(prompted, dict):
+            return False
+        return bool(prompted.get(self._stage_prompt_once_key(stage)))
+
+    def _clear_stage_prompted(self, context: ContextTypes.DEFAULT_TYPE, stage: str) -> None:
+        prompted = context.user_data.get("opening_stage_completed_prompt_sent")
+        if not isinstance(prompted, dict):
+            return
+        prompted.pop(self._stage_prompt_once_key(stage), None)
+        if prompted:
+            context.user_data["opening_stage_completed_prompt_sent"] = prompted
+        else:
+            context.user_data.pop("opening_stage_completed_prompt_sent", None)
+
+    def _cancel_receipt_roll_finalize_task(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        task = context.user_data.pop("receipt_roll_finalize_task", None)
+        if task and not task.done():
+            task.cancel()
+
+    def _queue_opening_group_photo(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        file_id: str,
+        image_title: str,
+        event_time=None,
+        media_kind: str = "photo",
+    ) -> None:
+        queue = context.user_data.get("pending_opening_group_photos")
+        if not isinstance(queue, list):
+            queue = []
+        queue.append(
+            {
+                "file_id": file_id,
+                "image_title": image_title,
+                "event_time": event_time,
+                "media_kind": media_kind,
+            }
+        )
+        context.user_data["pending_opening_group_photos"] = queue
+
+    def _get_image_media_kind(self, update: Update) -> str:
+        msg = update.message
+        if msg and getattr(msg, "photo", None):
+            return "photo"
+        return "document"
+
+    async def _send_group_media_album(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        items: list[dict],
+        caption: str = "",
+    ) -> bool:
+        group_chat_id = await self._get_group_chat_id()
+        if not group_chat_id:
+            logger.warning("Group media album skipped: group_chat_id is not configured")
+            return False
+        if not items:
+            return False
+
+        media = []
+        for idx, item in enumerate(items):
+            file_id = item.get("file_id")
+            if not file_id:
+                continue
+            item_caption = caption if idx == 0 else None
+            if item.get("media_kind") == "document":
+                media.append(InputMediaDocument(media=file_id, caption=item_caption))
+            else:
+                media.append(InputMediaPhoto(media=file_id, caption=item_caption))
+        if not media:
+            return False
+
+        try:
+            # Telegram allows max 10 media items in one album.
+            for i in range(0, len(media), 10):
+                chunk = media[i : i + 10]
+                if i > 0 and chunk:
+                    # caption only for the first sent chunk
+                    first = chunk[0]
+                    if isinstance(first, InputMediaPhoto):
+                        chunk[0] = InputMediaPhoto(media=first.media)
+                    else:
+                        chunk[0] = InputMediaDocument(media=first.media)
+                await context.bot.send_media_group(chat_id=group_chat_id, media=chunk)
+            return True
+        except Exception:
+            logger.exception("Failed to send media album to %s", group_chat_id)
+            return False
+
+    async def _flush_opening_group_photos(self, context: ContextTypes.DEFAULT_TYPE, shift_id: int) -> None:
+        queue = context.user_data.get("pending_opening_group_photos")
+        if not isinstance(queue, list):
+            context.user_data.pop("pending_opening_group_photos", None)
+            return
+
+        grouped: dict[str, list[dict]] = {}
+        for item in queue:
+            image_title = item.get("image_title")
+            if not image_title or not item.get("file_id"):
+                continue
+            grouped.setdefault(str(image_title), []).append(item)
+
+        shift_meta = await self._get_shift_meta(shift_id)
+        for image_title, items in grouped.items():
+            caption = (
+                f"📷 {image_title}\n"
+                f"👤 Kassir: {shift_meta.get('cashier') or '-'}\n"
+                f"🏬 Filial: {shift_meta.get('location') or '-'}\n"
+                f"⏰ Vaqt: {self._format_telegram_time(items[0].get('event_time'))}\n"
+                f"🖼️ Soni: {len(items)} ta"
+            )
+            sent_album = await self._send_group_media_album(context, items, caption=caption)
+            if sent_album:
+                continue
+            for item in items:
+                await self._send_group_shift_photo(
+                    context,
+                    shift_id,
+                    item.get("file_id"),
+                    image_title,
+                    event_time=item.get("event_time"),
+                )
+        context.user_data.pop("pending_opening_group_photos", None)
+
+    async def _finalize_shift_opening_flow(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        chat_id: int,
+        cashier_first_name: str,
+        cashier_last_name: str,
+    ) -> None:
+        if context.user_data.get("opening_finalize_done"):
+            return
+        context.user_data["opening_finalize_done"] = True
+
+        shift_id = context.user_data.get('current_shift_id')
+        location_name = await self._get_location_name(context.user_data.get('location_id'))
+        cashier_name = f"{cashier_first_name} {cashier_last_name or ''}".strip()
+        opening_message = self._build_shift_opened_message(
+            cashier_name,
+            location_name,
+            context.user_data.get('opening_amount', 0),
+            context.user_data.get('opening_amount_time', ''),
+        )
+        sent = await self._send_group_message(context, opening_message)
+        if sent and shift_id:
+            await self._flush_opening_group_photos(context, shift_id)
+
+        await context.bot.send_message(chat_id=chat_id, text="Smena muvaffaqiyatli ochildi! Endi sverka jarayonini boshlang.")
+        if not sent:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="Diqqat: smena ochilgani guruhga yuborilmadi. /setgroup va bot ruxsatlarini tekshiring.",
+            )
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="Kassir menyusi:",
+            reply_markup=self._build_cashier_menu_keyboard(),
+        )
+
+        self._cancel_receipt_roll_finalize_task(context)
+        context.user_data.pop("receipt_roll_finalize_token", None)
+        context.user_data['flow'] = None
+        context.user_data.pop('opening_stage', None)
+        context.user_data.pop("pending_opening_group_photos", None)
+        context.user_data.pop("opening_stage_locked_media_group_id", None)
+        context.user_data.pop("opening_stage_locked_name", None)
+        context.user_data.pop("pending_next_opening_stage", None)
+        context.user_data.pop("opening_stage_completed_prompt_sent", None)
+        context.user_data.pop("opening_finalize_done", None)
+
+    def _schedule_receipt_roll_finalize(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        chat_id: int,
+        cashier_first_name: str,
+        cashier_last_name: str,
+    ) -> None:
+        self._cancel_receipt_roll_finalize_task(context)
+        token = int(context.user_data.get("receipt_roll_finalize_token", 0)) + 1
+        context.user_data["receipt_roll_finalize_token"] = token
+
+        async def _runner():
+            try:
+                await asyncio.sleep(1.2)
+            except asyncio.CancelledError:
+                return
+            if context.user_data.get("receipt_roll_finalize_token") != token:
+                return
+            if context.user_data.get("opening_stage") != "receipt_roll":
+                return
+            await self._finalize_shift_opening_flow(
+                context,
+                chat_id=chat_id,
+                cashier_first_name=cashier_first_name,
+                cashier_last_name=cashier_last_name,
+            )
+
+        context.user_data["receipt_roll_finalize_task"] = asyncio.create_task(_runner())
 
     def _build_close_shift_progress_text(self, done: int, total: int, current_step: str) -> str:
         total = max(int(total or 0), 1)
@@ -2580,19 +3662,19 @@ class SardobaBot:
             return False
 
     def _parse_amount(self, text: str) -> float:
-        """Parse amounts like '12 300', '12,300', '12330 so'm'."""
-        raw = text.strip()
-        digits = ''.join(ch for ch in raw if ch.isdigit() or ch in ['.', ','])
-        if not digits:
-            return float(raw)
-        return float(digits.replace(',', ''))
+        """Parse amount values that contain digits only (spaces are allowed)."""
+        raw = (text or "").strip()
+        normalized = "".join(raw.split())
+        if not normalized or not normalized.isdigit():
+            raise ValueError("Amount must contain digits only.")
+        return float(normalized)
 
     def _format_telegram_time(self, dt_value) -> str:
         """Telegram message vaqtini Asia/Tashkent ga o'tkazib formatlaydi."""
         if not dt_value:
-            return datetime.now(ZoneInfo("Asia/Tashkent")).strftime("%Y-%m-%d %H:%M:%S")
+            return self._now_tashkent().strftime("%Y-%m-%d %H:%M:%S")
         try:
-            return dt_value.astimezone(ZoneInfo("Asia/Tashkent")).strftime("%Y-%m-%d %H:%M:%S")
+            return dt_value.astimezone(TASHKENT_TZ).strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             return str(dt_value)[:19]
 
@@ -2644,8 +3726,8 @@ class SardobaBot:
             keyboard.append([InlineKeyboardButton(f"{icon} {label}{suffix}", callback_data=f"op:{key}")])
 
         keyboard.append([
-            InlineKeyboardButton("Yangilash", callback_data="op:refresh"),
-            InlineKeyboardButton("Orqaga", callback_data="op:back"),
+            InlineKeyboardButton("🔄 Yangilash", callback_data="op:refresh"),
+            InlineKeyboardButton("⬅️ Orqaga", callback_data="op:back"),
         ])
 
         missing = await self._opening_missing_lines(shift_id)
@@ -2730,7 +3812,7 @@ class SardobaBot:
     def _invalid_amount_msg(self, context: ContextTypes.DEFAULT_TYPE) -> str:
         lang = 'uz'
         if lang == 'uz':
-            return "Iltimos, to'g'ri miqdor kiriting."
+            return "Iltimos, faqat raqam kiriting. Masalan: 0 yoki 120000."
         return "Р В РЎСџР В РЎвЂўР В Р’В¶Р В Р’В°Р В Р’В»Р РЋРЎвЂњР В РІвЂћвЂ“Р РЋР С“Р РЋРІР‚С™Р В Р’В°, Р В Р вЂ Р В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р В РЎвЂ”Р РЋР вЂљР В Р’В°Р В Р вЂ Р В РЎвЂР В Р’В»Р РЋР Р‰Р В Р вЂ¦Р РЋРЎвЂњР РЋР вЂ№ Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР РЋРЎвЂњ."
 
     async def show_sverka_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE, note: Optional[str] = None):
@@ -2741,15 +3823,21 @@ class SardobaBot:
         buttons = [] 
         for key, label_uz, label_ru, *_rest in self._sverka_config():
             label = label_uz if lang == 'uz' else label_ru
-            icon = "✅" if status.get(key) else "❌"
+            icon = "✅" if status.get(key) else "☐"
             buttons.append(InlineKeyboardButton(f"{icon} {label}", callback_data=f"sv:{key}"))
 
         keyboard = []
         for i in range(0, len(buttons), 2):
             keyboard.append(buttons[i:i+2])
 
-        finish_text = "Yakunlash" if lang == 'uz' else "Yakunlash"
-        keyboard.append([InlineKeyboardButton(finish_text, callback_data="sv:finish")])
+        finish_text = "🟢 Yakunlash" if lang == 'uz' else "🟢 Yakunlash"
+        cancel_text = "❌ Bekor qilish" if lang == 'uz' else "❌ Bekor qilish"
+        keyboard.append(
+            [
+                InlineKeyboardButton(finish_text, callback_data="sv:finish"),
+                InlineKeyboardButton(cancel_text, callback_data="sv:cancel"),
+            ]
+        )
 
         if not note:
             note = "Sverka bo'limlarini tanlang:" if lang == 'uz' else "Sverka bo'limlarini tanlang:"
@@ -2773,18 +3861,26 @@ class SardobaBot:
         await query.answer()
 
         key = (query.data or '').split(':', 1)[1] if query.data else ''
+        if key == 'cancel':
+            context.user_data['flow'] = None
+            context.user_data.pop('pending_sverka_key', None)
+            context.user_data.pop('pending_sverka_state', None)
+            context.user_data.pop('sverka_status', None)
+            self._clear_debt_received_detail_state(context)
+            self._clear_debt_payments_detail_state(context)
+            self._clear_expense_detail_state(context)
+            self._clear_generic_payment_method_state(context)
+            await context.bot.send_message(chat_id=query.message.chat_id, text="Sverka jarayoni bekor qilindi.")
+            await self.show_cashier_menu(update, context)
+            return MAIN_MENU
+
         if key == 'finish':
             if not self._sverka_all_done(context):
                 msg = "Hamma band to'ldirilmagan. Iltimos, qolganlarini to'ldiring." if 'uz' == 'uz' else "Р В РЎСљР В Р’Вµ Р В Р вЂ Р РЋР С“Р В Р’Вµ Р В РЎвЂ”Р РЋРЎвЂњР В Р вЂ¦Р В РЎвЂќР РЋРІР‚С™Р РЋРІР‚в„– Р В Р’В·Р В Р’В°Р В РЎвЂ”Р В РЎвЂўР В Р’В»Р В Р вЂ¦Р В Р’ВµР В Р вЂ¦Р РЋРІР‚в„–. Р В РІР‚вЂќР В Р’В°Р В РЎвЂ”Р В РЎвЂўР В Р’В»Р В Р вЂ¦Р В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р В РЎвЂўР РЋР С“Р РЋРІР‚С™Р В Р’В°Р В Р вЂ Р РЋРІвЂљВ¬Р В РЎвЂР В Р’ВµР РЋР С“Р РЋР РЏ."
                 await context.bot.send_message(chat_id=query.message.chat_id, text=msg)
                 await self.show_sverka_menu(update, context)
                 return SUBMIT_DAILY_REPORT
-            await self.save_daily_report(update, context)
-            msg = "Sverka yakunlandi! Barcha hisobotlar saqlandi." if 'uz' == 'uz' else "Р В Р Р‹Р В Р вЂ Р В Р’ВµР РЋР вЂљР В РЎвЂќР В Р’В° Р В Р’В·Р В Р’В°Р В Р вЂ Р В Р’ВµР РЋР вЂљР РЋРІвЂљВ¬Р В Р’ВµР В Р вЂ¦Р В Р’В°! Р В РІР‚в„ўР РЋР С“Р В Р’Вµ Р В РЎвЂўР РЋРІР‚С™Р РЋРІР‚РЋР В Р’ВµР РЋРІР‚С™Р РЋРІР‚в„– Р РЋР С“Р В РЎвЂўР РЋРІР‚В¦Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р В Р’ВµР В Р вЂ¦Р РЋРІР‚в„–."
-            await context.bot.send_message(chat_id=query.message.chat_id, text=msg)
-            await self.show_cashier_menu(update, context)
-            context.user_data['flow'] = None
-            return MAIN_MENU
+            return await self._finalize_sverka(update, context)
 
         config = {c[0]: c for c in self._sverka_config()}
         if key not in config:
@@ -2800,24 +3896,40 @@ class SardobaBot:
 
     async def _after_sverka_step(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if self._sverka_all_done(context):
-            await self.save_daily_report(update, context)
-            msg = "Sverka yakunlandi! Barcha hisobotlar saqlandi." if 'uz' == 'uz' else "Р В Р Р‹Р В Р вЂ Р В Р’ВµР РЋР вЂљР В РЎвЂќР В Р’В° Р В Р’В·Р В Р’В°Р В Р вЂ Р В Р’ВµР РЋР вЂљР РЋРІвЂљВ¬Р В Р’ВµР В Р вЂ¦Р В Р’В°! Р В РІР‚в„ўР РЋР С“Р В Р’Вµ Р В РЎвЂўР РЋРІР‚С™Р РЋРІР‚РЋР В Р’ВµР РЋРІР‚С™Р РЋРІР‚в„– Р РЋР С“Р В РЎвЂўР РЋРІР‚В¦Р РЋР вЂљР В Р’В°Р В Р вЂ¦Р В Р’ВµР В Р вЂ¦Р РЋРІР‚в„–."
-            await update.message.reply_text(msg)
-            await self.show_cashier_menu(update, context)
-            context.user_data['flow'] = None
-            return MAIN_MENU
+            note = "✅ Barcha bandlar to'ldirildi. Yakunlash tugmasini bosing." if 'uz' == 'uz' else "Barcha bandlar to'ldirildi. Yakunlash tugmasini bosing."
+            await self.show_sverka_menu(update, context, note=note)
+            return SUBMIT_DAILY_REPORT
 
         note = "Qabul qilindi. Keyingi bandni tanlang." if 'uz' == 'uz' else "Р В РЎСџР РЋР вЂљР В РЎвЂР В Р вЂ¦Р РЋР РЏР РЋРІР‚С™Р В РЎвЂў. Р В РІР‚в„ўР РЋРІР‚в„–Р В Р’В±Р В Р’ВµР РЋР вЂљР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋР С“Р В Р’В»Р В Р’ВµР В РўвЂР РЋРЎвЂњР РЋР вЂ№Р РЋРІР‚В°Р В РЎвЂР В РІвЂћвЂ“ Р В РЎвЂ”Р РЋРЎвЂњР В Р вЂ¦Р В РЎвЂќР РЋРІР‚С™."
         await self.show_sverka_menu(update, context, note=note)
         return SUBMIT_DAILY_REPORT
 
     async def close_shift(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Close active shift"""
+        """Save closing amount and ask cashier for note."""
         try:
             try:
                 amount = self._parse_amount(update.message.text)
             except ValueError:
-                await update.message.reply_text("Iltimos, to'g'ri miqdor kiriting.")
+                await update.message.reply_text(self._invalid_amount_msg(context))
+                return CLOSE_SHIFT
+
+            context.user_data["pending_close_amount"] = amount
+            await update.message.reply_text("Izoh kiriting (xohlagan matn):")
+            return CLOSE_SHIFT_NOTE
+        except Exception:
+            logger.exception("close_shift amount step failed")
+            context.user_data.pop("pending_close_amount", None)
+            context.user_data['flow'] = None
+            await update.message.reply_text("Smena yopishda xatolik bo'ldi. Qayta urinib ko'ring.")
+            await self.show_cashier_menu(update, context)
+            return MAIN_MENU
+
+    async def close_shift_note(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Close active shift after receiving cashier note."""
+        try:
+            amount = context.user_data.get("pending_close_amount")
+            if amount is None:
+                await update.message.reply_text("Avval yopish summasini kiriting.")
                 return CLOSE_SHIFT
 
             user_row = await self.db.fetch_one("SELECT id FROM users WHERE telegram_id = %s", (update.effective_user.id,))
@@ -2852,102 +3964,20 @@ class SardobaBot:
                     )
 
             shift_summary = await self._get_shift_summary(shift_id) or {}
-            shift_row, report_row, image_rows = await self._fetch_shift_export_data(shift_id)
-            opening_types = {
-                "workplace_status",
-                "terminal_power",
-                "zero_report",
-                "opening_notification",
-                "receipt_roll",
-            }
-            opening_image_rows = [row for row in image_rows if (row.get("image_type") or "").strip() in opening_types]
-            unique_image_refs = {
-                (row.get("image_url") or "").strip()
-                for row in image_rows
-                if (row.get("image_url") or "").strip()
-            }
-            total_steps = 7 + len(unique_image_refs)
-            progress_done = 0
-            progress_message = await update.message.reply_text(
-                self._build_close_shift_progress_text(0, total_steps, "Smena ma'lumotlari tayyorlanmoqda")
+            note = (update.message.text or "").strip()
+            sent = await self._send_group_message(
+                context,
+                self._build_shift_closed_message(shift_summary, note),
             )
-
-            async def advance(step_label: str):
-                nonlocal progress_done
-                progress_done += 1
-                await self._update_close_shift_progress(progress_message, progress_done, total_steps, step_label)
-
-            async def on_image_download(file_ref: str):
-                short_ref = file_ref[:18] + "..." if len(file_ref) > 21 else file_ref
-                await advance(f"Rasmlar yuklanmoqda: {short_ref}")
-
-            try:
-                await advance("Guruhga umumiy hisobot yuborilmoqda")
-                await self._send_group_message(
-                    context,
-                    self._build_shift_summary_message(shift_summary)
+            if not sent:
+                await update.message.reply_text(
+                    "Diqqat: smena yopilgani guruhga yuborilmadi. /setgroup va bot ruxsatlarini tekshiring."
                 )
-
-                image_blobs = await self._download_shift_image_blobs(
-                    context,
-                    image_rows,
-                    progress_callback=on_image_download,
-                )
-
-                full_xlsx = await asyncio.to_thread(
-                    self._build_shift_full_xlsx_workbook,
-                    shift_row,
-                    report_row,
-                    image_rows,
-                    image_blobs,
-                )
-                await advance("Batafsil Excel tayyorlandi")
-                await self._send_group_document(
-                    context,
-                    full_xlsx,
-                    f"kunlik_kassir_hisobot_shift_{shift_id}.xlsx",
-                    caption=self._build_shift_document_caption("📎 Batafsil smena hisobot (Excel)", shift_summary)
-                )
-                await advance("Batafsil Excel guruhga yuborildi")
-
-                images_xlsx = await asyncio.to_thread(
-                    self._build_shift_images_xlsx_workbook,
-                    image_rows,
-                    image_blobs,
-                )
-                await advance("To'lov va ish rasmlari Exceli tayyorlandi")
-                await self._send_group_document(
-                    context,
-                    images_xlsx,
-                    f"rasmlar_shift_{shift_id}.xlsx",
-                    caption=self._build_shift_document_caption("🖼️ Smena rasmlari (Excel)", shift_summary)
-                )
-                await advance("Smena rasmlari Exceli guruhga yuborildi")
-
-                opening_images_xlsx = await asyncio.to_thread(
-                    self._build_opening_images_xlsx_workbook,
-                    opening_image_rows,
-                    image_blobs,
-                )
-                await advance("Smena ochish rasmlari Exceli tayyorlandi")
-                await self._send_group_document(
-                    context,
-                    opening_images_xlsx,
-                    f"smena_ochish_rasmlari_shift_{shift_id}.xlsx",
-                    caption=self._build_shift_document_caption("🧰 Smena ochish rasmlari (Excel)", shift_summary)
-                )
-                await advance("Barcha fayllar guruhga yuborildi")
-            except Exception:
-                logger.exception("close_shift group send failed")
-                await progress_message.edit_text(
-                    "Smena yopildi, lekin Excel yoki guruhga yuborishda xatolik bo'ldi. Admin tekshirishi kerak."
-                )
-            else:
-                await progress_message.edit_text("Smena yopildi. Barcha fayllar tayyor va yuborildi.")
 
             await update.message.reply_text("Smena yopildi.")
             await self.show_cashier_menu(update, context)
             context.user_data['flow'] = None
+            context.user_data.pop('pending_close_amount', None)
             context.user_data.pop('current_shift_id', None)
             context.user_data.pop('opening_stage', None)
             context.user_data.pop('pending_payment_image', None)
@@ -2955,8 +3985,9 @@ class SardobaBot:
             context.user_data.pop('pending_sverka_state', None)
             return MAIN_MENU
         except Exception:
-            logger.exception("close_shift failed")
+            logger.exception("close_shift note step failed")
             context.user_data['flow'] = None
+            context.user_data.pop('pending_close_amount', None)
             await update.message.reply_text("Smena yopishda xatolik bo'ldi. Qayta urinib ko'ring.")
             await self.show_cashier_menu(update, context)
             return MAIN_MENU
@@ -3302,31 +4333,40 @@ class SardobaBot:
     async def _send_group_message(self, context: ContextTypes.DEFAULT_TYPE, text: str):
         group_chat_id = await self._get_group_chat_id()
         if not group_chat_id:
-            return
+            logger.warning("Group message skipped: group_chat_id is not configured")
+            return False
         try:
             await context.bot.send_message(chat_id=group_chat_id, text=text)
+            return True
         except Exception:
-            pass
+            logger.exception("Failed to send group message to %s", group_chat_id)
+            return False
 
     async def _send_group_photo(self, context: ContextTypes.DEFAULT_TYPE, file_id: str, caption: str = ""):
         group_chat_id = await self._get_group_chat_id()
         if not group_chat_id:
-            return
+            logger.warning("Group photo skipped: group_chat_id is not configured")
+            return False
         try:
             await context.bot.send_photo(chat_id=group_chat_id, photo=file_id, caption=caption)
+            return True
         except Exception:
-            pass
+            logger.exception("Failed to send group photo to %s", group_chat_id)
+            return False
 
     async def _send_group_document(self, context: ContextTypes.DEFAULT_TYPE, data: BytesIO, filename: str, caption: str = ""):
         group_chat_id = await self._get_group_chat_id()
         if not group_chat_id:
-            return
+            logger.warning("Group document skipped: group_chat_id is not configured")
+            return False
         try:
             data.seek(0)
             doc = InputFile(data, filename=filename)
             await context.bot.send_document(chat_id=group_chat_id, document=doc, caption=caption)
+            return True
         except Exception:
-            pass
+            logger.exception("Failed to send group document to %s", group_chat_id)
+            return False
 
     async def _get_shift_meta(self, shift_id: int):
         row = await self.db.fetch_one(
@@ -3360,9 +4400,30 @@ class SardobaBot:
         image_title: str,
         event_time=None
     ):
-        # Talab bo'yicha guruhga alohida rasmlar yuborilmaydi.
-        # Rasmlar faqat bitta/yig'ma fayl ko'rinishida smena yopilganda yuboriladi.
-        return
+        group_chat_id = await self._get_group_chat_id()
+        if not group_chat_id:
+            logger.warning("Group shift photo skipped: group_chat_id is not configured")
+            return False
+
+        shift_meta = await self._get_shift_meta(shift_id)
+        caption = (
+            f"📷 {image_title}\n"
+            f"👤 Kassir: {shift_meta.get('cashier') or '-'}\n"
+            f"🏬 Filial: {shift_meta.get('location') or '-'}\n"
+            f"⏰ Vaqt: {self._format_telegram_time(event_time)}"
+        )
+        try:
+            await context.bot.send_photo(chat_id=group_chat_id, photo=file_id, caption=caption)
+            return True
+        except Exception:
+            logger.exception("Failed to send group shift photo as photo, fallback to document")
+
+        try:
+            await context.bot.send_document(chat_id=group_chat_id, document=file_id, caption=caption)
+            return True
+        except Exception:
+            logger.exception("Failed to send group shift photo to %s", group_chat_id)
+            return False
 
     def _build_sverka_xlsx(self, cashier_name: str, phone: str, location: str, opened_at, report_data: dict) -> BytesIO:
         wb = Workbook()
@@ -3601,12 +4662,13 @@ def main():
             ADMIN_REGISTER_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.admin_register_password)],
             ADMIN_VERIFY_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.admin_verify_password)],
         },
-        fallbacks=[CommandHandler("cancel", lambda u, c: -1)],
+        fallbacks=[CommandHandler("cancel", bot.cancel)],
     )
 
     # Add handlers
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler("setgroup", bot.set_group))
+    application.add_handler(CommandHandler("cancel", bot.cancel))
 
     cashier_conv = ConversationHandler(
         entry_points=[
@@ -3663,8 +4725,9 @@ def main():
             EDIT_REPORT_SELECT: [CallbackQueryHandler(bot.edit_reports_select, pattern='^edit:')],
             EDIT_REPORT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.edit_reports_value)],
             CLOSE_SHIFT: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.close_shift)],
+            CLOSE_SHIFT_NOTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.close_shift_note)],
         },
-        fallbacks=[CommandHandler("cancel", lambda u, c: -1)],
+        fallbacks=[CommandHandler("cancel", bot.cancel)],
     )
     application.add_handler(cashier_conv)
     # Ensure sverka inline buttons always work even if conversation state was lost
@@ -3695,15 +4758,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-
-
-
-
-
-
-
-
-
-

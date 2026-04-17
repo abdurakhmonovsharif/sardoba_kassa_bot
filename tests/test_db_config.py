@@ -110,6 +110,7 @@ async def test_connect_creates_pool(monkeypatch):
     assert captured["dsn"] == "postgresql://user:pass@localhost/db"
     assert captured["min_size"] == db.minconn
     assert captured["max_size"] == db.maxconn
+    assert captured["server_settings"]["timezone"] == "Asia/Tashkent"
 
 
 @pytest.mark.asyncio

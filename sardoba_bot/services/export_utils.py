@@ -14,6 +14,8 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Table, TableStyle
 from sardoba_bot.db.queries import ReportQueries
 from sardoba_bot.db.connection import DatabaseConnection
 
+TASHKENT_TZ = ZoneInfo("Asia/Tashkent")
+
 
 class ExportUtils:
     def __init__(self, db=None):
@@ -27,9 +29,8 @@ class ExportUtils:
     def _datetime_bounds(self, start_date, end_date):
         start_day = datetime.fromisoformat(str(start_date)).date()
         end_day = datetime.fromisoformat(str(end_date)).date()
-        tz = ZoneInfo("Asia/Tashkent")
-        start_bound = datetime.combine(start_day, datetime.min.time(), tzinfo=tz)
-        end_bound = datetime.combine(end_day + timedelta(days=1), datetime.min.time(), tzinfo=tz)
+        start_bound = datetime.combine(start_day, datetime.min.time(), tzinfo=TASHKENT_TZ)
+        end_bound = datetime.combine(end_day + timedelta(days=1), datetime.min.time(), tzinfo=TASHKENT_TZ)
         return start_bound, end_bound
 
     async def _fetch_excel_dataset(self, report_type="daily", start_date=None, end_date=None):
@@ -84,8 +85,15 @@ class ExportUtils:
     def _normalize_excel_value(self, value):
         if value is None:
             return ""
-        if isinstance(value, (datetime, date, time)):
-            return str(value)
+        if isinstance(value, datetime):
+            try:
+                return value.astimezone(TASHKENT_TZ).strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return str(value)
+        if isinstance(value, date):
+            return value.isoformat()
+        if isinstance(value, time):
+            return value.strftime("%H:%M:%S")
         return value
 
     def _fit_excel_columns(self, ws):
