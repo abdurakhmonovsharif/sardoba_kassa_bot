@@ -54,6 +54,7 @@ from sardoba_bot.core.constants import (
     REPORT_DEBT_REFUNDS,
     REPORT_EXPENSES,
     REPORT_HUMO,
+    REPORT_P2P,
     REPORT_HUMO_REFUND,
     REPORT_OTHER_PAYMENTS,
     REPORT_SALES,
@@ -485,6 +486,7 @@ class SardobaBot:
             + _num("debt_received")
             + _num("uzcard_amount")
             + _num("humo_amount")
+            + _num("p2p_amount")
             + _num("other_payments")
             + _num("debt_refunds")
             - _num("expenses")
@@ -511,6 +513,7 @@ class SardobaBot:
                 COALESCE(r.expenses, 0) AS expenses,
                 COALESCE(r.uzcard_amount, 0) AS uzcard_amount,
                 COALESCE(r.humo_amount, 0) AS humo_amount,
+                COALESCE(r.p2p_amount, 0) AS p2p_amount,
                 COALESCE(r.uzcard_refund, 0) AS uzcard_refund,
                 COALESCE(r.humo_refund, 0) AS humo_refund,
                 COALESCE(r.other_payments, 0) AS other_payments,
@@ -527,6 +530,7 @@ class SardobaBot:
                     expenses,
                     uzcard_amount,
                     humo_amount,
+                    p2p_amount,
                     uzcard_refund,
                     humo_refund,
                     other_payments,
@@ -564,6 +568,7 @@ class SardobaBot:
             f"📉 Chiqim: {self._fmt_money(row.get('expenses'))}",
             f"💳 Uzcard: {self._fmt_money(row.get('uzcard_amount'))}",
             f"💳 Humo: {self._fmt_money(row.get('humo_amount'))}",
+            f"💳 P2P: {self._fmt_money(row.get('p2p_amount'))}",
             f"↩️ Uzcard vozvrat: {self._fmt_money(row.get('uzcard_refund'))}",
             f"↩️ Humo vozvrat: {self._fmt_money(row.get('humo_refund'))}",
             f"🧷 Boshqa to'lovlar: {self._fmt_money(row.get('other_payments'))}",
@@ -579,9 +584,6 @@ class SardobaBot:
         expense_lines = self._build_expense_detail_lines(row)
         if expense_lines:
             lines.extend(["", *expense_lines])
-        payment_method_lines = self._build_payment_method_lines(row)
-        if payment_method_lines:
-            lines.extend(["", *payment_method_lines])
         return "\n".join(lines)
 
     def _build_sverka_summary_message(self, row) -> str:
@@ -597,6 +599,7 @@ class SardobaBot:
             f"📉 Chiqim: {self._fmt_money(row.get('expenses'))}",
             f"💳 Uzcard: {self._fmt_money(row.get('uzcard_amount'))}",
             f"💳 Humo: {self._fmt_money(row.get('humo_amount'))}",
+            f"💳 P2P: {self._fmt_money(row.get('p2p_amount'))}",
             f"↩️ Uzcard vozvrat: {self._fmt_money(row.get('uzcard_refund'))}",
             f"↩️ Humo vozvrat: {self._fmt_money(row.get('humo_refund'))}",
             f"🧷 Boshqa to'lovlar: {self._fmt_money(row.get('other_payments'))}",
@@ -612,9 +615,6 @@ class SardobaBot:
         expense_lines = self._build_expense_detail_lines(row)
         if expense_lines:
             lines.extend(["", *expense_lines])
-        payment_method_lines = self._build_payment_method_lines(row)
-        if payment_method_lines:
-            lines.extend(["", *payment_method_lines])
         return "\n".join(lines)
 
     def _build_shift_document_caption(self, title: str, row) -> str:
@@ -1176,6 +1176,7 @@ class SardobaBot:
                     'expenses': self.report_expenses,
                     'uzcard_amount': self.report_uzcard,
                     'humo_amount': self.report_humo,
+                    'p2p_amount': self.report_p2p,
                     'uzcard_refund': self.report_uzcard_refund,
                     'humo_refund': self.report_humo_refund,
                     'other_payments': self.report_other_payments,
@@ -2117,6 +2118,19 @@ class SardobaBot:
             await update.message.reply_text(self._invalid_amount_msg(context))
             return REPORT_HUMO
 
+    async def report_p2p(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Get P2P amount"""
+        try:
+            amount = self._parse_amount(update.message.text)
+            context.user_data.pop('pending_sverka_key', None)
+            context.user_data.pop('pending_sverka_state', None)
+            context.user_data['p2p_amount'] = amount
+            self._mark_sverka_done(context, 'p2p_amount')
+            return await self._after_sverka_step(update, context)
+        except ValueError:
+            await update.message.reply_text(self._invalid_amount_msg(context))
+            return REPORT_P2P
+
     async def report_uzcard_refund(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Get Uzcard refund amount"""
         try:
@@ -2183,56 +2197,14 @@ class SardobaBot:
 
     async def report_debt_payments(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Get debt payments amount"""
-        stage = context.user_data.get("debt_payments_detail_stage")
-        if stage == "counterparty_name":
-            name = (update.message.text or "").strip()
-            if not name:
-                await update.message.reply_text("Kimga berilganini kiriting (ism).")
-                return REPORT_DEBT_PAYMENTS
-            context.user_data["debt_payments_counterparty_name"] = name
-            context.user_data["debt_payments_detail_stage"] = "counterparty_phone"
-            await update.message.reply_text("Telefon raqamini kiriting.")
-            return REPORT_DEBT_PAYMENTS
-        if stage == "counterparty_phone":
-            phone = (update.message.text or "").strip()
-            if not validate_phone_number(phone):
-                await update.message.reply_text("Iltimos, to'g'ri telefon raqamini kiriting.")
-                return REPORT_DEBT_PAYMENTS
-            context.user_data["debt_payments_counterparty_phone"] = phone
-            context.user_data["debt_payments_detail_stage"] = "payment_type"
-            await update.message.reply_text(
-                "Qarzga berilgan to'lovlar uchun to'lov turini tanlang.",
-                reply_markup=self._build_expense_payment_type_keyboard(),
-            )
-            return REPORT_DEBT_PAYMENTS
-        if stage == "payment_type":
-            payment_type = self._normalize_payment_type(update.message.text)
-            if not payment_type:
-                await update.message.reply_text(
-                    "Iltimos, to'lov turini tugmalardan tanlang.",
-                    reply_markup=self._build_expense_payment_type_keyboard(),
-                )
-                return REPORT_DEBT_PAYMENTS
-            context.user_data["debt_payments_payment_type"] = payment_type
-            context.user_data.pop("debt_payments_detail_stage", None)
+        try:
+            amount = self._parse_amount(update.message.text)
+            self._clear_debt_payments_detail_state(context)
+            context.user_data['debt_payments'] = amount
             context.user_data.pop('pending_sverka_key', None)
             context.user_data.pop('pending_sverka_state', None)
             self._mark_sverka_done(context, 'debt_payments')
-            await update.message.reply_text("To'lov turi qabul qilindi.", reply_markup=ReplyKeyboardRemove())
             return await self._after_sverka_step(update, context)
-        try:
-            amount = self._parse_amount(update.message.text)
-            context.user_data['debt_payments'] = amount
-            if amount <= 0:
-                self._clear_debt_payments_detail_state(context)
-                context.user_data.pop('pending_sverka_key', None)
-                context.user_data.pop('pending_sverka_state', None)
-                self._mark_sverka_done(context, 'debt_payments')
-                return await self._after_sverka_step(update, context)
-            self._clear_debt_payments_detail_state(context)
-            context.user_data["debt_payments_detail_stage"] = "counterparty_name"
-            await update.message.reply_text("Qarz to'lovi kimga berildi? Ismini kiriting.")
-            return REPORT_DEBT_PAYMENTS
         except ValueError:
             await update.message.reply_text(self._invalid_amount_msg(context))
             return REPORT_DEBT_PAYMENTS
@@ -2287,6 +2259,7 @@ class SardobaBot:
             'expenses': context.user_data.get('expenses', 0),
             'uzcard_amount': context.user_data.get('uzcard_amount', 0),
             'humo_amount': context.user_data.get('humo_amount', 0),
+            'p2p_amount': context.user_data.get('p2p_amount', 0),
             'uzcard_refund': context.user_data.get('uzcard_refund', 0),
             'humo_refund': context.user_data.get('humo_refund', 0),
             'other_payments': context.user_data.get('other_payments', 0),
@@ -2315,6 +2288,7 @@ class SardobaBot:
                     expenses = %(expenses)s,
                     uzcard_amount = %(uzcard_amount)s,
                     humo_amount = %(humo_amount)s,
+                    p2p_amount = %(p2p_amount)s,
                     uzcard_refund = %(uzcard_refund)s,
                     humo_refund = %(humo_refund)s,
                     other_payments = %(other_payments)s,
@@ -2327,11 +2301,11 @@ class SardobaBot:
             query = """
                 INSERT INTO reports (
                     shift_id, report_type, sales_amount, debt_received, expenses,
-                    uzcard_amount, humo_amount, uzcard_refund, humo_refund,
+                    uzcard_amount, humo_amount, p2p_amount, uzcard_refund, humo_refund,
                     other_payments, debt_payments, debt_refunds, report_data
                 ) VALUES (
                     %(shift_id)s, %(report_type)s, %(sales_amount)s, %(debt_received)s, %(expenses)s,
-                    %(uzcard_amount)s, %(humo_amount)s, %(uzcard_refund)s, %(humo_refund)s,
+                    %(uzcard_amount)s, %(humo_amount)s, %(p2p_amount)s, %(uzcard_refund)s, %(humo_refund)s,
                     %(other_payments)s, %(debt_payments)s, %(debt_refunds)s, %(report_data)s::jsonb
                 )
             """
@@ -2835,6 +2809,7 @@ class SardobaBot:
                 COALESCE(r.expenses,0) AS expenses,
                 COALESCE(r.uzcard_amount,0) AS uzcard_amount,
                 COALESCE(r.humo_amount,0) AS humo_amount,
+                COALESCE(r.p2p_amount,0) AS p2p_amount,
                 COALESCE(r.uzcard_refund,0) AS uzcard_refund,
                 COALESCE(r.humo_refund,0) AS humo_refund,
                 COALESCE(r.other_payments,0) AS other_payments,
@@ -2851,6 +2826,7 @@ class SardobaBot:
                     expenses,
                     uzcard_amount,
                     humo_amount,
+                    p2p_amount,
                     uzcard_refund,
                     humo_refund,
                     other_payments,
@@ -2924,6 +2900,7 @@ class SardobaBot:
                 + row['debt_received']
                 + row['uzcard_amount']
                 + row['humo_amount']
+                + row['p2p_amount']
                 + row['other_payments']
                 + row['debt_refunds']
                 - row['expenses']
@@ -2971,6 +2948,7 @@ class SardobaBot:
             "Chiqim",
             "Uzcard",
             "Humo",
+            "P2P",
             "Uzcard vozvrat",
             "Humo vozvrat",
             "Boshqa to'lovlar",
@@ -3001,6 +2979,7 @@ class SardobaBot:
                 + _f(row['debt_received'])
                 + _f(row['uzcard_amount'])
                 + _f(row['humo_amount'])
+                + _f(row['p2p_amount'])
                 + _f(row['other_payments'])
                 + _f(row['debt_refunds'])
                 - _f(row['expenses'])
@@ -3019,6 +2998,7 @@ class SardobaBot:
                 _f(row['expenses']),
                 _f(row['uzcard_amount']),
                 _f(row['humo_amount']),
+                _f(row['p2p_amount']),
                 _f(row['uzcard_refund']),
                 _f(row['humo_refund']),
                 _f(row['other_payments']),
@@ -3027,7 +3007,7 @@ class SardobaBot:
                 total_balance,
             ])
 
-        for col in range(5, 17):
+        for col in range(5, 18):
             for r in range(2, ws.max_row + 1):
                 ws.cell(row=r, column=col).number_format = "#,##0"
 
@@ -3685,6 +3665,7 @@ class SardobaBot:
             ('expenses', "Chiqimlar", "Р В Р’В Р В Р’В°Р РЋР С“Р РЋРІР‚В¦Р В РЎвЂўР В РўвЂР РЋРІР‚в„–", REPORT_EXPENSES, "Chiqimlarni kiriting (summa):", "Р В РІР‚в„ўР В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋР вЂљР В Р’В°Р РЋР С“Р РЋРІР‚В¦Р В РЎвЂўР В РўвЂР РЋРІР‚в„– (Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В°):"),
             ('uzcard_amount', "Uzcard summasi", "Uzcard Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В°", REPORT_UZCARD, "Uzcard orqali kiritilgan summani kiriting (summa):", "Р В РІР‚в„ўР В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР РЋРЎвЂњ Р В РЎвЂ”Р В РЎвЂў Uzcard (Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В°):"),
             ('humo_amount', "Humo summasi", "Humo Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В°", REPORT_HUMO, "Humo orqali kiritilgan summani kiriting (summa):", "Р В РІР‚в„ўР В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР РЋРЎвЂњ Р В РЎвЂ”Р В РЎвЂў Humo (Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В°):"),
+            ('p2p_amount', "P2P summasi", "P2P Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В°", REPORT_P2P, "P2P orqali kiritilgan summani kiriting (summa):", "Р В РІР‚в„ўР В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР РЋРЎвЂњ Р В РЎвЂ”Р В РЎвЂў P2P (Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В°):"),
             ('uzcard_refund', "Uzcard vozvrat", "Р В РІР‚в„ўР В РЎвЂўР В Р’В·Р В Р вЂ Р РЋР вЂљР В Р’В°Р РЋРІР‚С™ Uzcard", REPORT_UZCARD_REFUND, "Uzcard orqali vozvrat bo'lgan summani kiriting (summa):", "Р В РІР‚в„ўР В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р В Р вЂ Р В РЎвЂўР В Р’В·Р В Р вЂ Р РЋР вЂљР В Р’В°Р РЋРІР‚С™ Р В РЎвЂ”Р В РЎвЂў Uzcard (Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В°):"),
             ('humo_refund', "Humo vozvrat", "Р В РІР‚в„ўР В РЎвЂўР В Р’В·Р В Р вЂ Р РЋР вЂљР В Р’В°Р РЋРІР‚С™ Humo", REPORT_HUMO_REFUND, "Humo orqali vozvrat bo'lgan summani kiriting (summa):", "Р В РІР‚в„ўР В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р В Р вЂ Р В РЎвЂўР В Р’В·Р В Р вЂ Р РЋР вЂљР В Р’В°Р РЋРІР‚С™ Р В РЎвЂ”Р В РЎвЂў Humo (Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В°):"),
             ('other_payments', "Boshqa to'lovlar", "Р В РІР‚СњР РЋР вЂљР РЋРЎвЂњР В РЎвЂ“Р В РЎвЂР В Р’Вµ Р В РЎвЂўР В РЎвЂ”Р В Р’В»Р В Р’В°Р РЋРІР‚С™Р РЋРІР‚в„–", REPORT_OTHER_PAYMENTS, "Boshqa to'lov turlarini kiriting (summa):", "Р В РІР‚в„ўР В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р В РўвЂР РЋР вЂљР РЋРЎвЂњР В РЎвЂ“Р В РЎвЂР В Р’Вµ Р В РЎвЂўР В РЎвЂ”Р В Р’В»Р В Р’В°Р РЋРІР‚С™Р РЋРІР‚в„– (Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В°):"),
@@ -4033,6 +4014,7 @@ class SardobaBot:
         ws_rep = wb.create_sheet("Sverka")
         rep_headers = [
             "Savdo", "Kelgan qarz", "Chiqim", "Uzcard", "Humo",
+            "P2P",
             "Uzcard vozvrat", "Humo vozvrat", "Boshqa to'lovlar",
             "Qarzga berilgan to'lovlar", "Vozvrat qarzlar", "Sof summa",
         ]
@@ -4049,6 +4031,7 @@ class SardobaBot:
             + _f("debt_received")
             + _f("uzcard_amount")
             + _f("humo_amount")
+            + _f("p2p_amount")
             + _f("other_payments")
             + _f("debt_refunds")
             - _f("expenses")
@@ -4063,6 +4046,7 @@ class SardobaBot:
             _f("expenses"),
             _f("uzcard_amount"),
             _f("humo_amount"),
+            _f("p2p_amount"),
             _f("uzcard_refund"),
             _f("humo_refund"),
             _f("other_payments"),
@@ -4433,6 +4417,7 @@ class SardobaBot:
         headers = [
             "Kassir", "Telefon", "Filial", "Smena ochilgan vaqt",
             "Savdo", "Kelgan qarz", "Chiqim", "Uzcard", "Humo",
+            "P2P",
             "Uzcard vozvrat", "Humo vozvrat", "Boshqa to'lovlar",
             "Qarzga berilgan to'lovlar", "Vozvrat qarzlar", "Sof summa",
         ]
@@ -4442,6 +4427,7 @@ class SardobaBot:
             + float(report_data.get("debt_received", 0) or 0)
             + float(report_data.get("uzcard_amount", 0) or 0)
             + float(report_data.get("humo_amount", 0) or 0)
+            + float(report_data.get("p2p_amount", 0) or 0)
             + float(report_data.get("other_payments", 0) or 0)
             + float(report_data.get("debt_refunds", 0) or 0)
             - float(report_data.get("expenses", 0) or 0)
@@ -4460,6 +4446,7 @@ class SardobaBot:
             float(report_data.get("expenses", 0) or 0),
             float(report_data.get("uzcard_amount", 0) or 0),
             float(report_data.get("humo_amount", 0) or 0),
+            float(report_data.get("p2p_amount", 0) or 0),
             float(report_data.get("uzcard_refund", 0) or 0),
             float(report_data.get("humo_refund", 0) or 0),
             float(report_data.get("other_payments", 0) or 0),
@@ -4479,7 +4466,7 @@ class SardobaBot:
             cell.font = header_font
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-        money_cols = list(range(5, 16))
+        money_cols = list(range(5, 17))
         for col in money_cols:
             ws.cell(row=2, column=col).number_format = "#,##0"
 
@@ -4717,6 +4704,7 @@ def main():
             REPORT_EXPENSES: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_expenses)],
             REPORT_UZCARD: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_uzcard)],
             REPORT_HUMO: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_humo)],
+            REPORT_P2P: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_p2p)],
             REPORT_UZCARD_REFUND: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_uzcard_refund)],
             REPORT_HUMO_REFUND: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_humo_refund)],
             REPORT_OTHER_PAYMENTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_other_payments)],

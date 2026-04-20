@@ -22,6 +22,7 @@ from bot import (
     REPORT_DEBT_RECEIVED,
     REPORT_EXPENSES,
     REPORT_OTHER_PAYMENTS,
+    REPORT_P2P,
     REPORT_SALES,
     SUBMIT_DAILY_REPORT,
     UPLOAD_PAYMENT_IMAGE,
@@ -140,6 +141,7 @@ def test_day_bounds_and_total_balance():
             "expenses": 50,
             "uzcard_amount": 100,
             "humo_amount": 300,
+            "p2p_amount": 60,
             "uzcard_refund": 20,
             "humo_refund": 10,
             "other_payments": 40,
@@ -147,7 +149,7 @@ def test_day_bounds_and_total_balance():
             "debt_refunds": 5,
         }
     )
-    assert total == 1535
+    assert total == 1595
 
 
 def test_close_shift_progress_text_includes_percent_and_remaining():
@@ -172,6 +174,7 @@ async def test_after_sverka_step_waits_for_finish_button_when_all_done():
                 "expenses": True,
                 "uzcard_amount": True,
                 "humo_amount": True,
+                "p2p_amount": True,
                 "uzcard_refund": True,
                 "humo_refund": True,
                 "other_payments": True,
@@ -232,6 +235,7 @@ def test_build_shift_summary_message_is_readable():
             "expenses": 200_000,
             "uzcard_amount": 0,
             "humo_amount": 0,
+            "p2p_amount": 75_000,
             "uzcard_refund": 0,
             "humo_refund": 0,
             "other_payments": 0,
@@ -242,6 +246,7 @@ def test_build_shift_summary_message_is_readable():
     assert "📊 Kunlik umumiy hisobot" in text
     assert "👤 Kassir: Nilufar G'afurova" in text
     assert "🧾 Sverka" in text
+    assert "💳 P2P: 75 000" in text
 
 
 def test_build_shift_summary_message_includes_expense_detail():
@@ -486,6 +491,33 @@ async def test_save_daily_report_persists_debt_received_payment_type_json():
 
 
 @pytest.mark.asyncio
+async def test_save_daily_report_persists_p2p_amount_column():
+    fake_db = FakeDB(fetch_one_results=[None])
+    bot = make_bot(fake_db)
+    context = SimpleNamespace(
+        user_data={
+            "current_shift_id": 5,
+            "sales_amount": 120_000,
+            "debt_received": 0,
+            "expenses": 0,
+            "uzcard_amount": 0,
+            "humo_amount": 0,
+            "p2p_amount": 35_000,
+            "uzcard_refund": 0,
+            "humo_refund": 0,
+            "other_payments": 0,
+            "debt_payments": 0,
+            "debt_refunds": 0,
+        }
+    )
+
+    await bot.save_daily_report(None, context)
+
+    _, params = fake_db.execute_calls[0]
+    assert params["p2p_amount"] == 35_000
+
+
+@pytest.mark.asyncio
 async def test_save_daily_report_persists_generic_payment_methods_json():
     fake_db = FakeDB(fetch_one_results=[None])
     bot = make_bot(fake_db)
@@ -586,23 +618,34 @@ async def test_report_other_payments_positive_amount_requests_payment_type():
 
 
 @pytest.mark.asyncio
-async def test_report_debt_payments_collects_detail_and_returns_to_sverka():
+async def test_report_p2p_saves_amount_and_returns_to_sverka():
+    bot = make_bot()
+    bot._after_sverka_step = AsyncMock(return_value=SUBMIT_DAILY_REPORT)
+    context = SimpleNamespace(
+        user_data={"pending_sverka_key": "p2p_amount", "pending_sverka_state": REPORT_P2P}
+    )
+
+    state = await bot.report_p2p(make_text_update("120000")[0], context)
+
+    assert state == SUBMIT_DAILY_REPORT
+    assert context.user_data["p2p_amount"] == 120000
+    bot._after_sverka_step.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_report_debt_payments_positive_amount_completes_without_payment_type():
     bot = make_bot()
     bot._after_sverka_step = AsyncMock(return_value=SUBMIT_DAILY_REPORT)
     context = SimpleNamespace(
         user_data={"pending_sverka_key": "debt_payments", "pending_sverka_state": REPORT_DEBT_PAYMENTS}
     )
 
-    await bot.report_debt_payments(make_text_update("120000")[0], context)
-    await bot.report_debt_payments(make_text_update("Aziza")[0], context)
-    await bot.report_debt_payments(make_text_update("+998901112233")[0], context)
-    state = await bot.report_debt_payments(make_text_update("P2P")[0], context)
+    state = await bot.report_debt_payments(make_text_update("120000")[0], context)
 
     assert state == SUBMIT_DAILY_REPORT
-    assert context.user_data["debt_payments_counterparty_name"] == "Aziza"
-    assert context.user_data["debt_payments_counterparty_phone"] == "+998901112233"
-    assert context.user_data["debt_payments_payment_type"] == "P2P"
+    assert context.user_data["debt_payments"] == 120000
     assert "debt_payments_detail_stage" not in context.user_data
+    assert "debt_payments_payment_type" not in context.user_data
     bot._after_sverka_step.assert_awaited_once()
 
 

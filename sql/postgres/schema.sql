@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS reports (
     expenses NUMERIC(12, 2) DEFAULT 0,
     uzcard_amount NUMERIC(12, 2) DEFAULT 0,
     humo_amount NUMERIC(12, 2) DEFAULT 0,
+    p2p_amount NUMERIC(12, 2) DEFAULT 0,
     uzcard_refund NUMERIC(12, 2) DEFAULT 0,
     humo_refund NUMERIC(12, 2) DEFAULT 0,
     other_payments NUMERIC(12, 2) DEFAULT 0,
@@ -59,6 +60,9 @@ CREATE TABLE IF NOT EXISTS reports (
     report_data JSONB,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+ALTER TABLE IF EXISTS reports
+ADD COLUMN IF NOT EXISTS p2p_amount NUMERIC(12, 2) DEFAULT 0;
 
 -- Images
 CREATE TABLE IF NOT EXISTS images (

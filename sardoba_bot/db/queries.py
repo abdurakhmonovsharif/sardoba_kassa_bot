@@ -95,6 +95,7 @@ class ReportQueries:
             COALESCE(r.expenses, 0) AS expenses,
             COALESCE(r.uzcard_amount, 0) AS uzcard_amount,
             COALESCE(r.humo_amount, 0) AS humo_amount,
+            COALESCE(r.p2p_amount, 0) AS p2p_amount,
             COALESCE(r.uzcard_refund, 0) AS uzcard_refund,
             COALESCE(r.humo_refund, 0) AS humo_refund,
             COALESCE(r.other_payments, 0) AS other_payments,
@@ -105,6 +106,7 @@ class ReportQueries:
                 + COALESCE(r.debt_received, 0)
                 + COALESCE(r.uzcard_amount, 0)
                 + COALESCE(r.humo_amount, 0)
+                + COALESCE(r.p2p_amount, 0)
                 + COALESCE(r.other_payments, 0)
                 + COALESCE(r.debt_refunds, 0)
                 - COALESCE(r.expenses, 0)
@@ -122,6 +124,7 @@ class ReportQueries:
                 expenses,
                 uzcard_amount,
                 humo_amount,
+                p2p_amount,
                 uzcard_refund,
                 humo_refund,
                 other_payments,
@@ -168,6 +171,7 @@ class ReportQueries:
             COALESCE(r.expenses, 0) AS expenses,
             COALESCE(r.uzcard_amount, 0) AS uzcard_amount,
             COALESCE(r.humo_amount, 0) AS humo_amount,
+            COALESCE(r.p2p_amount, 0) AS p2p_amount,
             COALESCE(r.uzcard_refund, 0) AS uzcard_refund,
             COALESCE(r.humo_refund, 0) AS humo_refund,
             COALESCE(r.other_payments, 0) AS other_payments,
@@ -178,6 +182,7 @@ class ReportQueries:
                 + COALESCE(r.debt_received, 0)
                 + COALESCE(r.uzcard_amount, 0)
                 + COALESCE(r.humo_amount, 0)
+                + COALESCE(r.p2p_amount, 0)
                 + COALESCE(r.other_payments, 0)
                 + COALESCE(r.debt_refunds, 0)
                 - COALESCE(r.expenses, 0)
@@ -195,6 +200,7 @@ class ReportQueries:
                 expenses,
                 uzcard_amount,
                 humo_amount,
+                p2p_amount,
                 uzcard_refund,
                 humo_refund,
                 other_payments,

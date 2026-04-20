@@ -52,6 +52,7 @@ class ExportUtils:
                 ("Chiqim", "expenses"),
                 ("Uzcard", "uzcard_amount"),
                 ("Humo", "humo_amount"),
+                ("P2P", "p2p_amount"),
                 ("Uzcard vozvrat", "uzcard_refund"),
                 ("Humo vozvrat", "humo_refund"),
                 ("Boshqa to'lovlar", "other_payments"),
@@ -195,6 +196,7 @@ class ExportUtils:
                     "Chiqim",
                     "Uzcard",
                     "Humo",
+                    "P2P",
                     "Uzcard vozvrat",
                     "Humo vozvrat",
                     "Boshqa to'lov",
@@ -202,8 +204,8 @@ class ExportUtils:
                     "Vozvrat qarz",
                     "Sof summa",
                 ]
-                part1_idx = list(range(0, 8))
-                part2_idx = list(range(8, 15))
+                part1_idx = list(range(0, 9))
+                part2_idx = list(range(9, 16))
 
                 table_data_1 = [[headers[i] for i in part1_idx]]
                 table_data_2 = [[headers[i] for i in part2_idx]]
@@ -219,6 +221,7 @@ class ExportUtils:
                         f"{row['expenses']:,.0f}",
                         f"{row['uzcard_amount']:,.0f}",
                         f"{row['humo_amount']:,.0f}",
+                        f"{row['p2p_amount']:,.0f}",
                         f"{row['uzcard_refund']:,.0f}",
                         f"{row['humo_refund']:,.0f}",
                         f"{row['other_payments']:,.0f}",

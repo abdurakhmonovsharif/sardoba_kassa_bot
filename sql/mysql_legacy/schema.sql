@@ -57,6 +57,7 @@ CREATE TABLE reports (
     expenses DECIMAL(10, 2) DEFAULT 0,
     uzcard_amount DECIMAL(10, 2) DEFAULT 0,
     humo_amount DECIMAL(10, 2) DEFAULT 0,
+    p2p_amount DECIMAL(10, 2) DEFAULT 0,
     uzcard_refund DECIMAL(10, 2) DEFAULT 0,
     humo_refund DECIMAL(10, 2) DEFAULT 0,
     other_payments DECIMAL(10, 2) DEFAULT 0,
