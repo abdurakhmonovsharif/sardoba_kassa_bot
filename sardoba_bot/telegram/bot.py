@@ -360,6 +360,101 @@ class SardobaBot:
         ):
             context.user_data.pop(key, None)
 
+    def _clear_sverka_value_state(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        for key, *_ in self._sverka_config():
+            context.user_data.pop(key, None)
+        self._clear_debt_received_detail_state(context)
+        self._clear_debt_payments_detail_state(context)
+        self._clear_expense_detail_state(context)
+        self._clear_generic_payment_method_state(context)
+
+    def _clear_sverka_flow_state(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        context.user_data.pop("pending_sverka_key", None)
+        context.user_data.pop("pending_sverka_state", None)
+        context.user_data.pop("sverka_status", None)
+        context.user_data.pop("sverka_entrypoint", None)
+
+    async def _ensure_opening_requirements_completed(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        shift_id: int,
+    ) -> bool:
+        required_opening = [
+            ("workplace_status", "Ish joyi holati rasmi", 2),
+            ("terminal_power", "Terminal/ratsiya quvvati rasmi", 1),
+            ("zero_report", "Uzcard/Humo nol hisobot rasmi", 1),
+            ("opening_notification", "iiko/soliq smena ochilganlik rasmi", 1),
+            ("receipt_roll", "Zaxira chek lenta rasmi", 1),
+        ]
+        missing = []
+        for image_type, label, required_count in required_opening:
+            current_count = await self._count_shift_images(shift_id, image_type)
+            if current_count < required_count:
+                remaining = required_count - current_count
+                if required_count == 1:
+                    missing.append(f"- {label}")
+                else:
+                    missing.append(f"- {label} ({remaining} ta qolgan)")
+        if not missing:
+            return True
+
+        msg = (
+            "Smena ochish bosqichidagi rasmlar to'liq emas.\n"
+            "Quyidagilar yetishmayapti:\n"
+            + "\n".join(missing)
+        )
+        await self.show_opening_requirements_menu(update, context, shift_id, note=msg)
+        return False
+
+    def _prepare_sverka_context(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        shift_id: int,
+        entrypoint: str,
+        force_reset: bool = False,
+    ) -> None:
+        if force_reset or context.user_data.get("sverka_shift_id") != shift_id:
+            self._clear_sverka_value_state(context)
+
+        context.user_data["current_shift_id"] = shift_id
+        context.user_data["flow"] = "sverka"
+        context.user_data["sverka_shift_id"] = shift_id
+        context.user_data["sverka_entrypoint"] = entrypoint
+        context.user_data.pop("pending_close_amount", None)
+        context.user_data["sverka_status"] = {key: False for key, *_ in self._sverka_config()}
+        context.user_data.pop("pending_sverka_key", None)
+        context.user_data.pop("pending_sverka_state", None)
+        self._init_sverka_status(context)
+
+    async def _start_sverka_flow(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        shift_id: int,
+        entrypoint: str,
+        force_reset: bool = False,
+        note: Optional[str] = None,
+    ):
+        self._prepare_sverka_context(context, int(shift_id), entrypoint, force_reset=force_reset)
+        await self.show_sverka_menu(update, context, note=note)
+        return SUBMIT_DAILY_REPORT
+
+    async def _prompt_close_shift_amount(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        text: Optional[str] = None,
+    ):
+        context.user_data["flow"] = "closing"
+        context.user_data.pop("pending_close_amount", None)
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=text or "Smenani yopish uchun yakuniy summani kiriting:",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return CLOSE_SHIFT
+
     def _build_report_data_payload(self, context: ContextTypes.DEFAULT_TYPE) -> dict:
         payload = {}
 
@@ -1903,42 +1998,20 @@ class SardobaBot:
                 msg = "Avval smena ochishingiz kerak."
             else:
                 msg = "Р В Р’В Р В Р вЂ№Р В Р’В Р В РІР‚В¦Р В Р’В Р вЂ™Р’В°Р В Р Р‹Р Р†Р вЂљР Р‹Р В Р’В Р вЂ™Р’В°Р В Р’В Р вЂ™Р’В»Р В Р’В Р вЂ™Р’В° Р В Р’В Р В РІР‚В¦Р В Р Р‹Р РЋРІР‚СљР В Р’В Р вЂ™Р’В¶Р В Р’В Р В РІР‚В¦Р В Р’В Р РЋРІР‚Сћ Р В Р’В Р РЋРІР‚СћР В Р Р‹Р Р†Р вЂљРЎв„ўР В Р’В Р РЋРІР‚СњР В Р Р‹Р В РІР‚С™Р В Р Р‹Р Р†Р вЂљРІвЂћвЂ“Р В Р Р‹Р Р†Р вЂљРЎв„ўР В Р Р‹Р В Р вЂ° Р В Р Р‹Р В РЎвЂњР В Р’В Р РЋР’ВР В Р’В Р вЂ™Р’ВµР В Р’В Р В РІР‚В¦Р В Р Р‹Р РЋРІР‚Сљ."
-                
+            
             await update.message.reply_text(msg)
             return MAIN_MENU
         
         context.user_data['current_shift_id'] = active_shift['id']
-        required_opening = [
-            ('workplace_status', "Ish joyi holati rasmi", 2),
-            ('terminal_power', "Terminal/ratsiya quvvati rasmi", 1),
-            ('zero_report', "Uzcard/Humo nol hisobot rasmi", 1),
-            ('opening_notification', "iiko/soliq smena ochilganlik rasmi", 1),
-            ('receipt_roll', "Zaxira chek lenta rasmi", 1),
-        ]
-        missing = []
-        for image_type, label, required_count in required_opening:
-            current_count = await self._count_shift_images(active_shift['id'], image_type)
-            if current_count < required_count:
-                remaining = required_count - current_count
-                if required_count == 1:
-                    missing.append(f"- {label}")
-                else:
-                    missing.append(f"- {label} ({remaining} ta qolgan)")
-        if missing:
-            msg = (
-                "Smena ochish bosqichidagi rasmlar to'liq emas.\n"
-                "Quyidagilar yetishmayapti:\n"
-                + "\n".join(missing)
-            )
-            await self.show_opening_requirements_menu(update, context, int(active_shift['id']), note=msg)
+        if not await self._ensure_opening_requirements_completed(update, context, int(active_shift['id'])):
             return MAIN_MENU
 
-        # Init sverka status and show interactive checklist
-        context.user_data['flow'] = 'sverka'
-        context.user_data['sverka_status'] = {key: False for key, *_ in self._sverka_config()}
-        self._init_sverka_status(context)
-        await self.show_sverka_menu(update, context)
-        return SUBMIT_DAILY_REPORT
+        return await self._start_sverka_flow(
+            update,
+            context,
+            int(active_shift['id']),
+            entrypoint="standalone",
+        )
 
     async def report_sales(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Get sales amount"""
@@ -2324,6 +2397,20 @@ class SardobaBot:
             except Exception:
                 logger.exception("sverka group send failed")
 
+        entrypoint = context.user_data.get("sverka_entrypoint")
+        self._clear_sverka_flow_state(context)
+        self._clear_debt_received_detail_state(context)
+        self._clear_debt_payments_detail_state(context)
+        self._clear_expense_detail_state(context)
+        self._clear_generic_payment_method_state(context)
+
+        if entrypoint == "closing":
+            return await self._prompt_close_shift_amount(
+                update,
+                context,
+                text="Sverka ma'lumotlari guruhga yuborildi. Endi smenani yopish uchun yakuniy summani kiriting:",
+            )
+
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text="Sverka yakunlandi! Barcha hisobotlar saqlandi.",
@@ -2331,12 +2418,6 @@ class SardobaBot:
         )
         await self.show_cashier_menu(update, context)
         context.user_data['flow'] = None
-        context.user_data.pop('pending_sverka_key', None)
-        context.user_data.pop('pending_sverka_state', None)
-        self._clear_debt_received_detail_state(context)
-        self._clear_debt_payments_detail_state(context)
-        self._clear_expense_detail_state(context)
-        self._clear_generic_payment_method_state(context)
         return MAIN_MENU
 
     async def start_shift_closing(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2360,17 +2441,7 @@ class SardobaBot:
                 msg = "Р В РЎСљР В Р’ВµР РЋРІР‚С™ Р В РЎвЂўР РЋРІР‚С™Р В РЎвЂќР РЋР вЂљР РЋРІР‚в„–Р РЋРІР‚С™Р В РЎвЂўР В РІвЂћвЂ“ Р РЋР С“Р В РЎВР В Р’ВµР В Р вЂ¦Р РЋРІР‚в„–."
             await update.message.reply_text(msg)
             return MAIN_MENU
-        # Require sverka before closing
-        report = await self.db.fetch_one(
-            "SELECT id FROM reports WHERE shift_id=%s AND report_type='daily_report' ORDER BY id DESC LIMIT 1",
-            (active_shift['id'],)
-        )
-        if not report:
-            if lang == 'uz':
-                msg = "Avval sverka tugating. Smenani yopib bo'lmaydi."
-            else:
-                msg = "Р В Р Р‹Р В Р вЂ¦Р В Р’В°Р РЋРІР‚РЋР В Р’В°Р В Р’В»Р В Р’В° Р В Р’В·Р В Р’В°Р В Р вЂ Р В Р’ВµР РЋР вЂљР РЋРІвЂљВ¬Р В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋР С“Р В Р вЂ Р В Р’ВµР РЋР вЂљР В РЎвЂќР РЋРЎвЂњ. Р В РЎСљР В Р’ВµР В Р’В»Р РЋР Р‰Р В Р’В·Р РЋР РЏ Р В Р’В·Р В Р’В°Р В РЎвЂќР РЋР вЂљР РЋРІР‚в„–Р РЋРІР‚С™Р РЋР Р‰ Р РЋР С“Р В РЎВР В Р’ВµР В Р вЂ¦Р РЋРЎвЂњ."
-            await update.message.reply_text(msg)
+        if not await self._ensure_opening_requirements_completed(update, context, int(active_shift['id'])):
             return MAIN_MENU
         context.user_data['current_shift_id'] = active_shift['id']
 
@@ -2391,14 +2462,14 @@ class SardobaBot:
             )
             return await self.start_payment_image_upload(update, context)
 
-        if lang == 'uz':
-            msg = "Smenani yopish uchun yakuniy summani kiriting:"
-        else:
-            msg = "Р В РІР‚в„ўР В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р В РЎвЂР РЋРІР‚С™Р В РЎвЂўР В РЎвЂ“Р В РЎвЂўР В Р вЂ Р РЋРЎвЂњР РЋР вЂ№ Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР РЋРЎвЂњ Р В РўвЂР В Р’В»Р РЋР РЏ Р В Р’В·Р В Р’В°Р В РЎвЂќР РЋР вЂљР РЋРІР‚в„–Р РЋРІР‚С™Р В РЎвЂР РЋР РЏ Р РЋР С“Р В РЎВР В Р’ВµР В Р вЂ¦Р РЋРІР‚в„–:"
-
-        await update.message.reply_text(msg, reply_markup=ReplyKeyboardRemove())
-        context.user_data['flow'] = 'closing'
-        return CLOSE_SHIFT
+        return await self._start_sverka_flow(
+            update,
+            context,
+            int(active_shift['id']),
+            entrypoint="closing",
+            force_reset=True,
+            note="Smenani yopishdan oldin yakuniy sverkani to'ldiring.",
+        )
 
     async def start_payment_image_upload(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Ask cashier to choose Uzcard or Humo and then upload image"""
@@ -2529,11 +2600,14 @@ class SardobaBot:
 
             await update.message.reply_text("Uzcard va Humo rasmlari to'liq qabul qilindi.")
             if context.user_data.pop("awaiting_payment_images_for_close", False):
-                context.user_data['flow'] = 'closing'
-                await update.message.reply_text(
-                    "Rasmlar qabul qilindi. Endi smenani yopish uchun yakuniy summani kiriting:"
+                return await self._start_sverka_flow(
+                    update,
+                    context,
+                    int(shift_id),
+                    entrypoint="closing",
+                    force_reset=True,
+                    note="Rasmlar qabul qilindi. Endi yakuniy sverkani to'ldiring.",
                 )
-                return CLOSE_SHIFT
 
             context.user_data['flow'] = None
             await self.show_cashier_menu(update, context)
@@ -3843,15 +3917,16 @@ class SardobaBot:
 
         key = (query.data or '').split(':', 1)[1] if query.data else ''
         if key == 'cancel':
+            entrypoint = context.user_data.get("sverka_entrypoint")
             context.user_data['flow'] = None
-            context.user_data.pop('pending_sverka_key', None)
-            context.user_data.pop('pending_sverka_state', None)
-            context.user_data.pop('sverka_status', None)
+            self._clear_sverka_flow_state(context)
+            context.user_data.pop("awaiting_payment_images_for_close", None)
             self._clear_debt_received_detail_state(context)
             self._clear_debt_payments_detail_state(context)
             self._clear_expense_detail_state(context)
             self._clear_generic_payment_method_state(context)
-            await context.bot.send_message(chat_id=query.message.chat_id, text="Sverka jarayoni bekor qilindi.")
+            msg = "Kassa yopish jarayoni bekor qilindi." if entrypoint == "closing" else "Sverka jarayoni bekor qilindi."
+            await context.bot.send_message(chat_id=query.message.chat_id, text=msg)
             await self.show_cashier_menu(update, context)
             return MAIN_MENU
 
@@ -3962,8 +4037,9 @@ class SardobaBot:
             context.user_data.pop('current_shift_id', None)
             context.user_data.pop('opening_stage', None)
             context.user_data.pop('pending_payment_image', None)
-            context.user_data.pop('pending_sverka_key', None)
-            context.user_data.pop('pending_sverka_state', None)
+            context.user_data.pop("awaiting_payment_images_for_close", None)
+            context.user_data.pop("sverka_shift_id", None)
+            self._clear_sverka_flow_state(context)
             return MAIN_MENU
         except Exception:
             logger.exception("close_shift note step failed")

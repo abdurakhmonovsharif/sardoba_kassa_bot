@@ -730,7 +730,7 @@ async def test_finalize_sverka_sends_group_summary():
     bot._send_group_message = AsyncMock()
     bot.show_cashier_menu = AsyncMock()
     context = SimpleNamespace(
-        user_data={"current_shift_id": 5, "flow": "sverka"},
+        user_data={"current_shift_id": 5, "flow": "sverka", "sverka_entrypoint": "standalone"},
         bot=SimpleNamespace(send_message=AsyncMock()),
     )
     update = SimpleNamespace(effective_chat=SimpleNamespace(id=99), effective_message=FakeMessage())
@@ -741,6 +741,38 @@ async def test_finalize_sverka_sends_group_summary():
     bot.save_daily_report.assert_awaited_once()
     bot._send_group_message.assert_awaited_once()
     bot.show_cashier_menu.assert_awaited_once_with(update, context)
+
+
+@pytest.mark.asyncio
+async def test_finalize_sverka_from_closing_continues_to_close_amount_step():
+    bot = make_bot()
+    bot.save_daily_report = AsyncMock()
+    bot._get_shift_summary = AsyncMock(return_value={"location": "Sardoba", "report_data": {}})
+    bot._send_group_message = AsyncMock()
+    bot._prompt_close_shift_amount = AsyncMock(return_value=CLOSE_SHIFT)
+    bot.show_cashier_menu = AsyncMock()
+    context = SimpleNamespace(
+        user_data={
+            "current_shift_id": 5,
+            "flow": "sverka",
+            "sverka_entrypoint": "closing",
+            "pending_sverka_key": "sales_amount",
+            "pending_sverka_state": REPORT_SALES,
+            "expense_detail_stage": "payment_type",
+        },
+        bot=SimpleNamespace(send_message=AsyncMock()),
+    )
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=99), effective_message=FakeMessage())
+
+    state = await bot._finalize_sverka(update, context)
+
+    assert state == CLOSE_SHIFT
+    bot.save_daily_report.assert_awaited_once()
+    bot._send_group_message.assert_awaited_once()
+    bot._prompt_close_shift_amount.assert_awaited_once()
+    bot.show_cashier_menu.assert_not_awaited()
+    assert "pending_sverka_key" not in context.user_data
+    assert "expense_detail_stage" not in context.user_data
 
 
 @pytest.mark.asyncio
@@ -1401,17 +1433,20 @@ async def test_upload_payment_image_moves_to_close_amount_when_pair_complete_for
             "current_shift_id": 5,
             "flow": "payment_image",
             "awaiting_payment_images_for_close": True,
-        }
+        },
+        bot=SimpleNamespace(send_message=AsyncMock()),
     )
+    bot.show_sverka_menu = AsyncMock()
 
     state = await bot.upload_payment_image(update, context)
 
-    assert state == CLOSE_SHIFT
-    assert context.user_data.get("flow") == "closing"
+    assert state == SUBMIT_DAILY_REPORT
+    assert context.user_data.get("flow") == "sverka"
+    assert context.user_data.get("sverka_entrypoint") == "closing"
     assert "pending_payment_image" not in context.user_data
     assert "awaiting_payment_images_for_close" not in context.user_data
-    assert update.message.replies[-2]["text"] == "Uzcard va Humo rasmlari to'liq qabul qilindi."
-    assert "yakuniy summani kiriting" in update.message.replies[-1]["text"].lower()
+    assert update.message.replies[-1]["text"] == "Uzcard va Humo rasmlari to'liq qabul qilindi."
+    bot.show_sverka_menu.assert_awaited_once()
     bot.show_cashier_menu.assert_not_awaited()
 
 
@@ -1421,11 +1456,11 @@ async def test_start_shift_closing_redirects_to_payment_upload_when_images_missi
         fetch_one_results=[
             {"id": 10},  # user
             {"id": 5},  # active shift
-            {"id": 77},  # daily report exists
         ]
     )
     bot = make_bot(fake_db)
     bot._ensure_cashier_authenticated = AsyncMock(return_value=True)
+    bot._ensure_opening_requirements_completed = AsyncMock(return_value=True)
     bot._count_shift_images = AsyncMock(side_effect=[0, 1])
     bot.start_payment_image_upload = AsyncMock(return_value=UPLOAD_PAYMENT_IMAGE)
     update, message = make_text_update("Smena yopish", user_id=42)
@@ -1438,6 +1473,35 @@ async def test_start_shift_closing_redirects_to_payment_upload_when_images_missi
     assert context.user_data["current_shift_id"] == 5
     assert "majburiy" in message.replies[-1]["text"]
     bot.start_payment_image_upload.assert_awaited_once_with(update, context)
+
+
+@pytest.mark.asyncio
+async def test_start_shift_closing_starts_final_sverka_when_images_ready():
+    fake_db = FakeDB(
+        fetch_one_results=[
+            {"id": 10},
+            {"id": 5},
+        ]
+    )
+    bot = make_bot(fake_db)
+    bot._ensure_cashier_authenticated = AsyncMock(return_value=True)
+    bot._ensure_opening_requirements_completed = AsyncMock(return_value=True)
+    bot._count_shift_images = AsyncMock(side_effect=[1, 1])
+    bot._start_sverka_flow = AsyncMock(return_value=SUBMIT_DAILY_REPORT)
+    update, _ = make_text_update("Smena yopish", user_id=42)
+    context = SimpleNamespace(user_data={})
+
+    state = await bot.start_shift_closing(update, context)
+
+    assert state == SUBMIT_DAILY_REPORT
+    bot._start_sverka_flow.assert_awaited_once_with(
+        update,
+        context,
+        5,
+        entrypoint="closing",
+        force_reset=True,
+        note="Smenani yopishdan oldin yakuniy sverkani to'ldiring.",
+    )
 
 
 @pytest.mark.asyncio
