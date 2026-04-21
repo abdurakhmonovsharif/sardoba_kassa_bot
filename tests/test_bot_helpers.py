@@ -743,6 +743,42 @@ async def test_finalize_sverka_sends_group_summary():
     bot.show_cashier_menu.assert_awaited_once_with(update, context)
 
 
+def test_build_sverka_summary_message_places_payment_method_under_other_payments():
+    bot = make_bot()
+
+    text = bot._build_sverka_summary_message(
+        {
+            "first_name": "Ali",
+            "last_name": "Valiyev",
+            "location": "Sardoba",
+            "opened_at": "2026-04-21 10:00:00",
+            "sales_amount": 0,
+            "debt_received": 0,
+            "expenses": 0,
+            "uzcard_amount": 0,
+            "humo_amount": 0,
+            "p2p_amount": 0,
+            "uzcard_refund": 0,
+            "humo_refund": 0,
+            "other_payments": 500_000_000,
+            "debt_payments": 0,
+            "debt_refunds": 0,
+            "report_data": json.dumps(
+                {
+                    "payment_methods": {
+                        "other_payments": "Naqd",
+                    }
+                }
+            ),
+        }
+    )
+
+    lines = text.splitlines()
+    idx = lines.index("🧷 Boshqa to'lovlar: 500 000 000")
+    assert lines[idx + 1] == "   ↳ To'lov turi: Naqd"
+    assert "💳 To'lov turlari" not in text
+
+
 @pytest.mark.asyncio
 async def test_finalize_sverka_from_closing_continues_to_close_amount_step():
     bot = make_bot()

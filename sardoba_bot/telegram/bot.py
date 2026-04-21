@@ -569,6 +569,16 @@ class SardobaBot:
                 lines.append(f"• {label}: {method}")
         return lines if len(lines) > 1 else []
 
+    def _build_inline_payment_method_line(self, row, key: str) -> Optional[str]:
+        report_data = self._parse_report_data((row or {}).get("report_data"))
+        methods = report_data.get("payment_methods")
+        if not isinstance(methods, dict):
+            return None
+        method = methods.get(key)
+        if not method:
+            return None
+        return f"   ↳ To'lov turi: {method}"
+
     def _calculate_total_balance(self, row) -> float:
         def _num(key: str) -> float:
             try:
@@ -670,6 +680,13 @@ class SardobaBot:
             f"🤝 Qarzga berilgan to'lovlar: {self._fmt_money(row.get('debt_payments'))}",
             f"🔁 Vozvrat qarzlar: {self._fmt_money(row.get('debt_refunds'))}",
         ]
+        other_payments_method_line = self._build_inline_payment_method_line(row, "other_payments")
+        if other_payments_method_line:
+            lines.insert(lines.index(f"🤝 Qarzga berilgan to'lovlar: {self._fmt_money(row.get('debt_payments'))}"), other_payments_method_line)
+        debt_refunds_method_line = self._build_inline_payment_method_line(row, "debt_refunds")
+        if debt_refunds_method_line:
+            debt_refunds_index = lines.index(f"🔁 Vozvrat qarzlar: {self._fmt_money(row.get('debt_refunds'))}")
+            lines.insert(debt_refunds_index + 1, debt_refunds_method_line)
         debt_received_lines = self._build_debt_received_detail_lines(row)
         if debt_received_lines:
             lines.extend(["", *debt_received_lines])
@@ -701,6 +718,13 @@ class SardobaBot:
             f"🤝 Qarzga berilgan to'lovlar: {self._fmt_money(row.get('debt_payments'))}",
             f"🔁 Vozvrat qarzlar: {self._fmt_money(row.get('debt_refunds'))}",
         ]
+        other_payments_method_line = self._build_inline_payment_method_line(row, "other_payments")
+        if other_payments_method_line:
+            lines.insert(lines.index(f"🤝 Qarzga berilgan to'lovlar: {self._fmt_money(row.get('debt_payments'))}"), other_payments_method_line)
+        debt_refunds_method_line = self._build_inline_payment_method_line(row, "debt_refunds")
+        if debt_refunds_method_line:
+            debt_refunds_index = lines.index(f"🔁 Vozvrat qarzlar: {self._fmt_money(row.get('debt_refunds'))}")
+            lines.insert(debt_refunds_index + 1, debt_refunds_method_line)
         debt_received_lines = self._build_debt_received_detail_lines(row)
         if debt_received_lines:
             lines.extend(["", *debt_received_lines])
