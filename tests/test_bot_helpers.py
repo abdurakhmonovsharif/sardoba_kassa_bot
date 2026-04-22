@@ -518,7 +518,7 @@ async def test_save_daily_report_persists_p2p_amount_column():
 
 
 @pytest.mark.asyncio
-async def test_save_daily_report_persists_generic_payment_methods_json():
+async def test_save_daily_report_persists_other_payments_comment_json():
     fake_db = FakeDB(fetch_one_results=[None])
     bot = make_bot(fake_db)
     context = SimpleNamespace(
@@ -531,10 +531,10 @@ async def test_save_daily_report_persists_generic_payment_methods_json():
             "humo_amount": 0,
             "uzcard_refund": 0,
             "humo_refund": 0,
-            "other_payments": 10_000,
+            "other_payments": 0,
             "debt_payments": 0,
             "debt_refunds": 0,
-            "other_payments_payment_type": "Naqd",
+            "other_payments_comment": "Terminal bo'yicha izoh qoldirildi",
         }
     )
 
@@ -542,7 +542,7 @@ async def test_save_daily_report_persists_generic_payment_methods_json():
 
     _, params = fake_db.execute_calls[0]
     payload = json.loads(params["report_data"])
-    assert payload["payment_methods"]["other_payments"] == "Naqd"
+    assert payload["other_payments_comment"] == "Terminal bo'yicha izoh qoldirildi"
 
 
 @pytest.mark.asyncio
@@ -602,19 +602,21 @@ async def test_report_debt_received_collects_payment_type_and_returns_to_sverka(
 
 
 @pytest.mark.asyncio
-async def test_report_other_payments_positive_amount_requests_payment_type():
+async def test_report_other_payments_comment_completes_and_is_saved():
     bot = make_bot()
-    update, message = make_text_update("25000")
+    bot._after_sverka_step = AsyncMock(return_value=SUBMIT_DAILY_REPORT)
+    update, message = make_text_update("Terminal bo'yicha izoh")
     context = SimpleNamespace(
         user_data={"pending_sverka_key": "other_payments", "pending_sverka_state": REPORT_OTHER_PAYMENTS}
     )
 
     state = await bot.report_other_payments(update, context)
 
-    assert state == REPORT_OTHER_PAYMENTS
-    assert context.user_data["other_payments"] == 25000
-    assert context.user_data["other_payments_detail_stage"] == "payment_type"
-    assert isinstance(message.replies[-1]["reply_markup"], ReplyKeyboardMarkup)
+    assert state == SUBMIT_DAILY_REPORT
+    assert context.user_data["other_payments"] == 0
+    assert context.user_data["other_payments_comment"] == "Terminal bo'yicha izoh"
+    assert not message.replies
+    bot._after_sverka_step.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -633,19 +635,38 @@ async def test_report_p2p_saves_amount_and_returns_to_sverka():
 
 
 @pytest.mark.asyncio
-async def test_report_debt_payments_positive_amount_completes_without_payment_type():
+async def test_report_debt_payments_positive_amount_requests_counterparty_name():
+    bot = make_bot()
+    update, message = make_text_update("120000")
+    context = SimpleNamespace(
+        user_data={"pending_sverka_key": "debt_payments", "pending_sverka_state": REPORT_DEBT_PAYMENTS}
+    )
+
+    state = await bot.report_debt_payments(update, context)
+
+    assert state == REPORT_DEBT_PAYMENTS
+    assert context.user_data["debt_payments"] == 120000
+    assert context.user_data["debt_payments_detail_stage"] == "counterparty_name"
+    assert "kimga berildi" in message.replies[-1]["text"].lower()
+
+
+@pytest.mark.asyncio
+async def test_report_debt_payments_collects_phone_and_returns_to_sverka():
     bot = make_bot()
     bot._after_sverka_step = AsyncMock(return_value=SUBMIT_DAILY_REPORT)
     context = SimpleNamespace(
         user_data={"pending_sverka_key": "debt_payments", "pending_sverka_state": REPORT_DEBT_PAYMENTS}
     )
 
-    state = await bot.report_debt_payments(make_text_update("120000")[0], context)
+    await bot.report_debt_payments(make_text_update("120000")[0], context)
+    await bot.report_debt_payments(make_text_update("Rustam")[0], context)
+    state = await bot.report_debt_payments(make_text_update("+998901112233")[0], context)
 
     assert state == SUBMIT_DAILY_REPORT
     assert context.user_data["debt_payments"] == 120000
+    assert context.user_data["debt_payments_counterparty_name"] == "Rustam"
+    assert context.user_data["debt_payments_counterparty_phone"] == "+998901112233"
     assert "debt_payments_detail_stage" not in context.user_data
-    assert "debt_payments_payment_type" not in context.user_data
     bot._after_sverka_step.assert_awaited_once()
 
 
@@ -743,7 +764,7 @@ async def test_finalize_sverka_sends_group_summary():
     bot.show_cashier_menu.assert_awaited_once_with(update, context)
 
 
-def test_build_sverka_summary_message_places_payment_method_under_other_payments():
+def test_build_sverka_summary_message_places_comment_under_other_payments():
     bot = make_bot()
 
     text = bot._build_sverka_summary_message(
@@ -760,22 +781,20 @@ def test_build_sverka_summary_message_places_payment_method_under_other_payments
             "p2p_amount": 0,
             "uzcard_refund": 0,
             "humo_refund": 0,
-            "other_payments": 500_000_000,
+            "other_payments": 0,
             "debt_payments": 0,
             "debt_refunds": 0,
             "report_data": json.dumps(
                 {
-                    "payment_methods": {
-                        "other_payments": "Naqd",
-                    }
+                    "other_payments_comment": "Terminal bo'yicha qo'shimcha izoh",
                 }
             ),
         }
     )
 
     lines = text.splitlines()
-    idx = lines.index("🧷 Boshqa to'lovlar: 500 000 000")
-    assert lines[idx + 1] == "   ↳ To'lov turi: Naqd"
+    idx = lines.index("🧷 Boshqa to'lovlar: izoh kiritilgan")
+    assert lines[idx + 1] == "   ↳ Izoh: Terminal bo'yicha qo'shimcha izoh"
     assert "💳 To'lov turlari" not in text
 
 

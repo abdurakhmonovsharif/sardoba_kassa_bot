@@ -318,7 +318,6 @@ class SardobaBot:
 
     def _sverka_payment_method_labels(self) -> dict[str, str]:
         return {
-            "other_payments": "Boshqa to'lovlar",
             "debt_refunds": "Vozvrat qarzlar",
         }
 
@@ -326,6 +325,7 @@ class SardobaBot:
         for key in (
             "other_payments_detail_stage",
             "other_payments_payment_type",
+            "other_payments_comment",
             "debt_refunds_detail_stage",
             "debt_refunds_payment_type",
         ):
@@ -496,6 +496,10 @@ class SardobaBot:
             if expense_detail:
                 payload["expense_detail"] = expense_detail
 
+        other_payments_comment = (context.user_data.get("other_payments_comment") or "").strip()
+        if other_payments_comment:
+            payload["other_payments_comment"] = other_payments_comment
+
         payment_methods = {}
         for key in self._sverka_payment_method_labels():
             amount = float(context.user_data.get(key) or 0)
@@ -578,6 +582,27 @@ class SardobaBot:
         if not method:
             return None
         return f"   ↳ To'lov turi: {method}"
+
+    def _build_other_payments_comment_line(self, row) -> Optional[str]:
+        report_data = self._parse_report_data((row or {}).get("report_data"))
+        comment = report_data.get("other_payments_comment")
+        if not isinstance(comment, str):
+            return None
+        comment = comment.strip()
+        if not comment:
+            return None
+        return f"   ↳ Izoh: {comment}"
+
+    def _format_other_payments_value(self, row) -> str:
+        try:
+            amount = float((row or {}).get("other_payments") or 0)
+        except Exception:
+            amount = 0.0
+        if amount > 0:
+            return self._fmt_money(amount)
+        if self._build_other_payments_comment_line(row):
+            return "izoh kiritilgan"
+        return self._fmt_money(amount)
 
     def _calculate_total_balance(self, row) -> float:
         def _num(key: str) -> float:
@@ -676,13 +701,14 @@ class SardobaBot:
             f"💳 P2P: {self._fmt_money(row.get('p2p_amount'))}",
             f"↩️ Uzcard vozvrat: {self._fmt_money(row.get('uzcard_refund'))}",
             f"↩️ Humo vozvrat: {self._fmt_money(row.get('humo_refund'))}",
-            f"🧷 Boshqa to'lovlar: {self._fmt_money(row.get('other_payments'))}",
+            f"🧷 Boshqa to'lovlar: {self._format_other_payments_value(row)}",
             f"🤝 Qarzga berilgan to'lovlar: {self._fmt_money(row.get('debt_payments'))}",
             f"🔁 Vozvrat qarzlar: {self._fmt_money(row.get('debt_refunds'))}",
         ]
-        other_payments_method_line = self._build_inline_payment_method_line(row, "other_payments")
-        if other_payments_method_line:
-            lines.insert(lines.index(f"🤝 Qarzga berilgan to'lovlar: {self._fmt_money(row.get('debt_payments'))}"), other_payments_method_line)
+        other_payments_comment_line = self._build_other_payments_comment_line(row)
+        if other_payments_comment_line:
+            other_payments_index = lines.index(f"🧷 Boshqa to'lovlar: {self._format_other_payments_value(row)}")
+            lines.insert(other_payments_index + 1, other_payments_comment_line)
         debt_refunds_method_line = self._build_inline_payment_method_line(row, "debt_refunds")
         if debt_refunds_method_line:
             debt_refunds_index = lines.index(f"🔁 Vozvrat qarzlar: {self._fmt_money(row.get('debt_refunds'))}")
@@ -714,13 +740,14 @@ class SardobaBot:
             f"💳 P2P: {self._fmt_money(row.get('p2p_amount'))}",
             f"↩️ Uzcard vozvrat: {self._fmt_money(row.get('uzcard_refund'))}",
             f"↩️ Humo vozvrat: {self._fmt_money(row.get('humo_refund'))}",
-            f"🧷 Boshqa to'lovlar: {self._fmt_money(row.get('other_payments'))}",
+            f"🧷 Boshqa to'lovlar: {self._format_other_payments_value(row)}",
             f"🤝 Qarzga berilgan to'lovlar: {self._fmt_money(row.get('debt_payments'))}",
             f"🔁 Vozvrat qarzlar: {self._fmt_money(row.get('debt_refunds'))}",
         ]
-        other_payments_method_line = self._build_inline_payment_method_line(row, "other_payments")
-        if other_payments_method_line:
-            lines.insert(lines.index(f"🤝 Qarzga berilgan to'lovlar: {self._fmt_money(row.get('debt_payments'))}"), other_payments_method_line)
+        other_payments_comment_line = self._build_other_payments_comment_line(row)
+        if other_payments_comment_line:
+            other_payments_index = lines.index(f"🧷 Boshqa to'lovlar: {self._format_other_payments_value(row)}")
+            lines.insert(other_payments_index + 1, other_payments_comment_line)
         debt_refunds_method_line = self._build_inline_payment_method_line(row, "debt_refunds")
         if debt_refunds_method_line:
             debt_refunds_index = lines.index(f"🔁 Vozvrat qarzlar: {self._fmt_money(row.get('debt_refunds'))}")
@@ -2007,6 +2034,7 @@ class SardobaBot:
         self._clear_debt_received_detail_state(context)
         self._clear_debt_payments_detail_state(context)
         self._clear_expense_detail_state(context)
+        self._clear_generic_payment_method_state(context)
 
         # Check if there's an active shift
         user_row = await self.db.fetch_one("SELECT id FROM users WHERE telegram_id = %s", (update.effective_user.id,))
@@ -2256,52 +2284,56 @@ class SardobaBot:
 
     async def report_other_payments(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Get other payments amount"""
-        if context.user_data.get("other_payments_detail_stage") == "payment_type":
-            payment_type = self._normalize_payment_type(update.message.text)
-            if not payment_type:
-                await update.message.reply_text(
-                    "Iltimos, to'lov turini tugmalardan tanlang.",
-                    reply_markup=self._build_expense_payment_type_keyboard(),
-                )
-                return REPORT_OTHER_PAYMENTS
-            context.user_data["other_payments_payment_type"] = payment_type
-            context.user_data.pop("other_payments_detail_stage", None)
-            context.user_data.pop('pending_sverka_key', None)
-            context.user_data.pop('pending_sverka_state', None)
-            self._mark_sverka_done(context, 'other_payments')
-            await update.message.reply_text("To'lov turi qabul qilindi.", reply_markup=ReplyKeyboardRemove())
-            return await self._after_sverka_step(update, context)
-        try:
-            amount = self._parse_amount(update.message.text)
-            context.user_data['other_payments'] = amount
-            if amount <= 0:
-                context.user_data.pop("other_payments_detail_stage", None)
-                context.user_data.pop("other_payments_payment_type", None)
-                context.user_data.pop('pending_sverka_key', None)
-                context.user_data.pop('pending_sverka_state', None)
-                self._mark_sverka_done(context, 'other_payments')
-                return await self._after_sverka_step(update, context)
-            context.user_data.pop("other_payments_payment_type", None)
-            context.user_data["other_payments_detail_stage"] = "payment_type"
-            await update.message.reply_text(
-                "Boshqa to'lovlar uchun to'lov turini tanlang.",
-                reply_markup=self._build_expense_payment_type_keyboard(),
-            )
+        comment = (update.message.text or "").strip()
+        if not comment:
+            await update.message.reply_text("Boshqa to'lovlar bo'yicha izohni kiriting.")
             return REPORT_OTHER_PAYMENTS
-        except ValueError:
-            await update.message.reply_text(self._invalid_amount_msg(context))
-            return REPORT_OTHER_PAYMENTS
+        self._clear_generic_payment_method_state(context)
+        context.user_data['other_payments'] = 0
+        context.user_data["other_payments_comment"] = comment
+        context.user_data.pop('pending_sverka_key', None)
+        context.user_data.pop('pending_sverka_state', None)
+        self._mark_sverka_done(context, 'other_payments')
+        return await self._after_sverka_step(update, context)
 
     async def report_debt_payments(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Get debt payments amount"""
-        try:
-            amount = self._parse_amount(update.message.text)
-            self._clear_debt_payments_detail_state(context)
-            context.user_data['debt_payments'] = amount
+        stage = context.user_data.get("debt_payments_detail_stage")
+        if stage == "counterparty_name":
+            name = (update.message.text or "").strip()
+            if not name:
+                await update.message.reply_text("Kimga berilganini kiriting (ism).")
+                return REPORT_DEBT_PAYMENTS
+            context.user_data["debt_payments_counterparty_name"] = name
+            context.user_data["debt_payments_detail_stage"] = "counterparty_phone"
+            await update.message.reply_text("Telefon raqamini kiriting.")
+            return REPORT_DEBT_PAYMENTS
+        if stage == "counterparty_phone":
+            phone = (update.message.text or "").strip()
+            if not validate_phone_number(phone):
+                await update.message.reply_text("Iltimos, to'g'ri telefon raqamini kiriting.")
+                return REPORT_DEBT_PAYMENTS
+            context.user_data["debt_payments_counterparty_phone"] = phone
+            context.user_data.pop("debt_payments_detail_stage", None)
             context.user_data.pop('pending_sverka_key', None)
             context.user_data.pop('pending_sverka_state', None)
             self._mark_sverka_done(context, 'debt_payments')
+            await update.message.reply_text("Ma'lumotlar qabul qilindi.", reply_markup=ReplyKeyboardRemove())
             return await self._after_sverka_step(update, context)
+        try:
+            amount = self._parse_amount(update.message.text)
+            context.user_data['debt_payments'] = amount
+            if amount <= 0:
+                self._clear_debt_payments_detail_state(context)
+                context.user_data.pop('pending_sverka_key', None)
+                context.user_data.pop('pending_sverka_state', None)
+                self._mark_sverka_done(context, 'debt_payments')
+                return await self._after_sverka_step(update, context)
+
+            self._clear_debt_payments_detail_state(context)
+            context.user_data["debt_payments_detail_stage"] = "counterparty_name"
+            await update.message.reply_text("Qarzga berilgan to'lov kimga berildi? Ismini kiriting.")
+            return REPORT_DEBT_PAYMENTS
         except ValueError:
             await update.message.reply_text(self._invalid_amount_msg(context))
             return REPORT_DEBT_PAYMENTS
@@ -3766,7 +3798,7 @@ class SardobaBot:
             ('p2p_amount', "P2P summasi", "P2P Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В°", REPORT_P2P, "P2P orqali kiritilgan summani kiriting (summa):", "Р В РІР‚в„ўР В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР РЋРЎвЂњ Р В РЎвЂ”Р В РЎвЂў P2P (Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В°):"),
             ('uzcard_refund', "Uzcard vozvrat", "Р В РІР‚в„ўР В РЎвЂўР В Р’В·Р В Р вЂ Р РЋР вЂљР В Р’В°Р РЋРІР‚С™ Uzcard", REPORT_UZCARD_REFUND, "Uzcard orqali vozvrat bo'lgan summani kiriting (summa):", "Р В РІР‚в„ўР В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р В Р вЂ Р В РЎвЂўР В Р’В·Р В Р вЂ Р РЋР вЂљР В Р’В°Р РЋРІР‚С™ Р В РЎвЂ”Р В РЎвЂў Uzcard (Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В°):"),
             ('humo_refund', "Humo vozvrat", "Р В РІР‚в„ўР В РЎвЂўР В Р’В·Р В Р вЂ Р РЋР вЂљР В Р’В°Р РЋРІР‚С™ Humo", REPORT_HUMO_REFUND, "Humo orqali vozvrat bo'lgan summani kiriting (summa):", "Р В РІР‚в„ўР В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р В Р вЂ Р В РЎвЂўР В Р’В·Р В Р вЂ Р РЋР вЂљР В Р’В°Р РЋРІР‚С™ Р В РЎвЂ”Р В РЎвЂў Humo (Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В°):"),
-            ('other_payments', "Boshqa to'lovlar", "Р В РІР‚СњР РЋР вЂљР РЋРЎвЂњР В РЎвЂ“Р В РЎвЂР В Р’Вµ Р В РЎвЂўР В РЎвЂ”Р В Р’В»Р В Р’В°Р РЋРІР‚С™Р РЋРІР‚в„–", REPORT_OTHER_PAYMENTS, "Boshqa to'lov turlarini kiriting (summa):", "Р В РІР‚в„ўР В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р В РўвЂР РЋР вЂљР РЋРЎвЂњР В РЎвЂ“Р В РЎвЂР В Р’Вµ Р В РЎвЂўР В РЎвЂ”Р В Р’В»Р В Р’В°Р РЋРІР‚С™Р РЋРІР‚в„– (Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В°):"),
+            ('other_payments', "Boshqa to'lovlar", "Р В РІР‚СњР РЋР вЂљР РЋРЎвЂњР В РЎвЂ“Р В РЎвЂР В Р’Вµ Р В РЎвЂўР В РЎвЂ”Р В Р’В»Р В Р’В°Р РЋРІР‚С™Р РЋРІР‚в„–", REPORT_OTHER_PAYMENTS, "Boshqa to'lovlar bo'yicha izohni kiriting:", "Р В РІР‚в„ўР В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р В РўвЂР РЋР вЂљР РЋРЎвЂњР В РЎвЂ“Р В РЎвЂР В Р’Вµ Ռ В Ռ…Р В Р№Р В Ռ…Ռ В ӨР Վ…Ռ В ՐВ°Ռ В ЎвЂұՌ В ЎвЂ”Р В Р’В°Р РЋРІР‚С™Ռ РЋՌ…:"),
             ('debt_payments', "Qarzga berilgan to'lovlar", "Р В РІР‚в„ўР РЋРІР‚в„–Р В РўвЂР В Р’В°Р В Р вЂ¦Р В Р вЂ¦Р РЋРІР‚в„–Р В Р’Вµ Р В Р вЂ  Р В РўвЂР В РЎвЂўР В Р’В»Р В РЎвЂ“", REPORT_DEBT_PAYMENTS, "Qarzga berilgan to'lovlarni kiriting (summa):", "Р В РІР‚в„ўР В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р В Р вЂ Р РЋРІР‚в„–Р В РўвЂР В Р’В°Р В Р вЂ¦Р В Р вЂ¦Р РЋРІР‚в„–Р В Р’Вµ Р В Р вЂ  Р В РўвЂР В РЎвЂўР В Р’В»Р В РЎвЂ“ (Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В°):"),
             ('debt_refunds', "Vozvrat qarzlar", "Р В РІР‚в„ўР В РЎвЂўР В Р’В·Р В Р вЂ Р РЋР вЂљР В Р’В°Р РЋРІР‚С™ Р В РўвЂР В РЎвЂўР В Р’В»Р В РЎвЂ“Р В РЎвЂўР В Р вЂ ", REPORT_DEBT_REFUNDS, "Vozvrat qarzlarni kiriting (summa):", "Р В РІР‚в„ўР В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р В Р вЂ Р В РЎвЂўР В Р’В·Р В Р вЂ Р РЋР вЂљР В Р’В°Р РЋРІР‚С™ Р В РўвЂР В РЎвЂўР В Р’В»Р В РЎвЂ“Р В РЎвЂўР В Р вЂ  (Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В°):")
         ]
