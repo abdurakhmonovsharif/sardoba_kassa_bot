@@ -134,6 +134,13 @@ class SardobaBot:
             one_time_keyboard=True,
         )
 
+    def _build_expense_entry_keyboard(self) -> ReplyKeyboardMarkup:
+        """Create a keyboard for multi-entry expense collection."""
+        return ReplyKeyboardMarkup(
+            [[KeyboardButton("Yana qo'shish"), KeyboardButton("Yakunlash")]],
+            resize_keyboard=True,
+        )
+
     def _prime_cashier_password_setup(self, context: ContextTypes.DEFAULT_TYPE, telegram_id: int) -> None:
         """Mark a cashier so their next message starts the password setup flow."""
         application = getattr(context, "application", None)
@@ -316,6 +323,13 @@ class SardobaBot:
     def _normalize_expense_payment_type(self, text: str) -> Optional[str]:
         return self._normalize_payment_type(text)
 
+    def _normalize_expense_action(self, text: str) -> Optional[str]:
+        normalized = (text or "").strip().lower()
+        return {
+            "yana qo'shish": "add_more",
+            "yakunlash": "finish",
+        }.get(normalized)
+
     def _sverka_payment_method_labels(self) -> dict[str, str]:
         return {
             "debt_refunds": "Vozvrat qarzlar",
@@ -349,16 +363,105 @@ class SardobaBot:
         ):
             context.user_data.pop(key, None)
 
-    def _clear_expense_detail_state(self, context: ContextTypes.DEFAULT_TYPE) -> None:
-        for key in (
+    def _clear_expense_detail_state(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        *,
+        keep_items: bool = False,
+    ) -> None:
+        keys = [
             "expense_detail_stage",
             "expense_payment_type",
             "expense_paid_to",
             "expense_recipient_name",
             "expense_recipient_phone",
             "expense_reason",
-        ):
+        ]
+        if not keep_items:
+            keys.append("expense_items")
+        for key in keys:
             context.user_data.pop(key, None)
+
+    def _expense_items(self, context: ContextTypes.DEFAULT_TYPE) -> list[dict]:
+        items = context.user_data.get("expense_items")
+        if not isinstance(items, list):
+            items = []
+            context.user_data["expense_items"] = items
+        return items
+
+    def _expense_items_total(self, context: ContextTypes.DEFAULT_TYPE) -> float:
+        total = 0.0
+        for item in context.user_data.get("expense_items") or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                total += float(item.get("amount") or 0)
+            except Exception:
+                continue
+        return total
+
+    def _parse_expense_item(self, text: str) -> dict:
+        raw = (text or "").strip()
+        if not raw:
+            raise ValueError("Expense line is empty.")
+
+        matches = list(re.finditer(r"\d[\d\s,._]*", raw))
+        if not matches:
+            raise ValueError("Expense line does not contain amount.")
+
+        amount_text = re.sub(r"[^\d\s]", "", matches[-1].group(0))
+        amount = self._parse_amount(amount_text)
+        if amount <= 0:
+            raise ValueError("Expense amount must be positive.")
+
+        return {"text": raw, "amount": amount}
+
+    def _build_expense_entry_prompt(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        note: Optional[str] = None,
+    ) -> str:
+        lines = []
+        if note:
+            lines.append(note)
+
+        lines.extend(
+            [
+                "Chiqim sababini kiriting.",
+                "Masalan:",
+                "Mirshod Dastafka -- 10 000",
+                "Ulug Paynet -- 100 000",
+            ]
+        )
+
+        item_lines = []
+        for item in context.user_data.get("expense_items") or []:
+            if not isinstance(item, dict):
+                continue
+            text = (item.get("text") or "").strip()
+            if text:
+                item_lines.append(f"• {text}")
+
+        if item_lines:
+            lines.extend(
+                [
+                    "",
+                    "Kiritilgan chiqimlar:",
+                    *item_lines,
+                    f"Jami chiqim: {self._fmt_money(self._expense_items_total(context))}",
+                    "",
+                    "Keyingi qatorni yuboring yoki Yakunlashni bosing.",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "",
+                    "Agar chiqim bo'lmasa, Yakunlashni bosing.",
+                ]
+            )
+
+        return "\n".join(lines)
 
     def _clear_sverka_value_state(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         for key, *_ in self._sverka_config():
@@ -483,16 +586,38 @@ class SardobaBot:
                 payload["debt_payments_detail"] = debt_payments_detail
 
         if float(context.user_data.get("expenses") or 0) > 0:
-            expense_detail = {
+            expense_items = []
+            for item in context.user_data.get("expense_items") or []:
+                if not isinstance(item, dict):
+                    continue
+                text = (item.get("text") or "").strip()
+                if not text:
+                    continue
+
+                entry = {"text": text}
+                try:
+                    amount = float(item.get("amount") or 0)
+                except Exception:
+                    amount = 0
+                if amount > 0:
+                    entry["amount"] = amount
+                expense_items.append(entry)
+
+            expense_detail = {}
+            if expense_items:
+                expense_detail["items"] = expense_items
+
+            legacy_detail = {
                 "payment_type": context.user_data.get("expense_payment_type"),
                 "paid_to": context.user_data.get("expense_paid_to"),
                 "recipient_name": context.user_data.get("expense_recipient_name"),
                 "recipient_phone": context.user_data.get("expense_recipient_phone"),
                 "reason": context.user_data.get("expense_reason"),
             }
-            expense_detail = {
-                key: value for key, value in expense_detail.items() if value not in (None, "")
+            legacy_detail = {
+                key: value for key, value in legacy_detail.items() if value not in (None, "")
             }
+            expense_detail.update(legacy_detail)
             if expense_detail:
                 payload["expense_detail"] = expense_detail
 
@@ -548,6 +673,17 @@ class SardobaBot:
             return []
 
         lines = ["📌 Chiqim tafsiloti"]
+        items = detail.get("items")
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    text = (item.get("text") or "").strip()
+                elif isinstance(item, str):
+                    text = item.strip()
+                else:
+                    text = ""
+                if text:
+                    lines.append(f"• {text}")
         if detail.get("payment_type"):
             lines.append(f"💳 To'lov turi: {detail['payment_type']}")
         if detail.get("paid_to"):
@@ -558,7 +694,7 @@ class SardobaBot:
             lines.append(f"📞 Telefon: {detail['recipient_phone']}")
         if detail.get("reason"):
             lines.append(f"📝 Sabab: {detail['reason']}")
-        return lines
+        return lines if len(lines) > 1 else []
 
     def _build_payment_method_lines(self, row) -> list[str]:
         report_data = self._parse_report_data((row or {}).get("report_data"))
@@ -787,14 +923,24 @@ class SardobaBot:
     def _build_shift_closed_message(self, row, note: str) -> str:
         cashier_name = f"{row.get('first_name', '')} {row.get('last_name') or ''}".strip() or "Kassir"
         safe_note = (note or "").strip() or "Izoh qoldirilmadi"
-        return (
-            "🔒 Smena yopildi\n"
-            f"👤 Kassir: {cashier_name}\n"
-            f"🏬 Filial: {row.get('location') or '-'}\n"
-            f"💰 Yopish summasi: {self._fmt_money(row.get('closing_amount'))}\n"
-            f"🕙 Yopilish vaqti: {self._fmt_datetime(row.get('closed_at'))}\n"
-            f"📝 Izoh: {safe_note}"
-        )
+        lines = [
+            "🔒 Smena yopildi",
+            f"👤 Kassir: {cashier_name}",
+            f"🏬 Filial: {row.get('location') or '-'}",
+            f"💰 Yopish summasi: {self._fmt_money(row.get('closing_amount'))}",
+            f"🕙 Yopilish vaqti: {self._fmt_datetime(row.get('closed_at'))}",
+            f"📝 Izoh: {safe_note}",
+        ]
+        try:
+            expenses = float(row.get("expenses") or 0)
+        except Exception:
+            expenses = 0.0
+        if expenses > 0:
+            lines.extend(["", f"📉 Chiqim: {self._fmt_money(row.get('expenses'))}"])
+            expense_lines = self._build_expense_detail_lines(row)
+            if expense_lines:
+                lines.extend(["", *expense_lines])
+        return "\n".join(lines)
 
     def _build_payment_image_uploaded_message(self, image_title: str, shift_meta: dict, event_time) -> str:
         return (
@@ -2140,82 +2286,55 @@ class SardobaBot:
             return REPORT_DEBT_RECEIVED
 
     async def report_expenses(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Get expenses amount"""
-        stage = context.user_data.get("expense_detail_stage")
-        if stage == "payment_type":
-            payment_type = self._normalize_payment_type(update.message.text)
-            if not payment_type:
+        """Collect expense lines and calculate the total automatically."""
+        context.user_data["expense_detail_stage"] = "items"
+        text = (update.message.text or "").strip()
+        action = self._normalize_expense_action(text)
+
+        if action == "add_more":
+            if not self._expense_items(context):
                 await update.message.reply_text(
-                    "Iltimos, to'lov turini tugmalardan tanlang.",
-                    reply_markup=self._build_expense_payment_type_keyboard(),
+                    self._build_expense_entry_prompt(context, note="Avval kamida bitta chiqim kiriting."),
+                    reply_markup=self._build_expense_entry_keyboard(),
                 )
                 return REPORT_EXPENSES
-            context.user_data["expense_payment_type"] = payment_type
-            context.user_data["expense_detail_stage"] = "paid_to"
             await update.message.reply_text(
-                "Kimga berildi? Masalan: yetkazib beruvchi, xodim, kuryer.",
-                reply_markup=ReplyKeyboardRemove(),
+                self._build_expense_entry_prompt(context, note="Keyingi chiqimni kiriting."),
+                reply_markup=self._build_expense_entry_keyboard(),
             )
             return REPORT_EXPENSES
-        if stage == "paid_to":
-            paid_to = (update.message.text or "").strip()
-            if not paid_to:
-                await update.message.reply_text("Kimga berilganini kiriting.")
-                return REPORT_EXPENSES
-            context.user_data["expense_paid_to"] = paid_to
-            context.user_data["expense_detail_stage"] = "recipient_name"
-            await update.message.reply_text("Qabul qiluvchining ismini kiriting.")
-            return REPORT_EXPENSES
-        if stage == "recipient_name":
-            recipient_name = (update.message.text or "").strip()
-            if not recipient_name:
-                await update.message.reply_text("Qabul qiluvchining ismini kiriting.")
-                return REPORT_EXPENSES
-            context.user_data["expense_recipient_name"] = recipient_name
-            context.user_data["expense_detail_stage"] = "recipient_phone"
-            await update.message.reply_text("Qabul qiluvchining telefon raqamini kiriting.")
-            return REPORT_EXPENSES
-        if stage == "recipient_phone":
-            phone = (update.message.text or "").strip()
-            if not validate_phone_number(phone):
-                await update.message.reply_text("Iltimos, to'g'ri telefon raqamini kiriting.")
-                return REPORT_EXPENSES
-            context.user_data["expense_recipient_phone"] = phone
-            context.user_data["expense_detail_stage"] = "reason"
-            await update.message.reply_text("Chiqim sababini kiriting.")
-            return REPORT_EXPENSES
-        if stage == "reason":
-            reason = (update.message.text or "").strip()
-            if not reason:
-                await update.message.reply_text("Chiqim sababini kiriting.")
-                return REPORT_EXPENSES
-            context.user_data["expense_reason"] = reason
+
+        if action == "finish":
+            total = self._expense_items_total(context)
+            context.user_data["expenses"] = total
             context.user_data.pop('pending_sverka_key', None)
             context.user_data.pop('pending_sverka_state', None)
-            context.user_data.pop("expense_detail_stage", None)
+            self._clear_expense_detail_state(context, keep_items=total > 0)
             self._mark_sverka_done(context, 'expenses')
+            await update.message.reply_text(
+                "Chiqimlar qabul qilindi." if total > 0 else "Chiqimlar kiritilmadi.",
+                reply_markup=ReplyKeyboardRemove(),
+            )
             return await self._after_sverka_step(update, context)
 
         try:
-            amount = self._parse_amount(update.message.text)
-            context.user_data['expenses'] = amount
-            if amount <= 0:
-                self._clear_expense_detail_state(context)
-                context.user_data.pop('pending_sverka_key', None)
-                context.user_data.pop('pending_sverka_state', None)
-                self._mark_sverka_done(context, 'expenses')
-                return await self._after_sverka_step(update, context)
-
-            self._clear_expense_detail_state(context)
-            context.user_data["expense_detail_stage"] = "payment_type"
+            item = self._parse_expense_item(text)
+        except ValueError:
             await update.message.reply_text(
-                "Chiqim mavjud. To'lov turini tanlang.",
-                reply_markup=self._build_expense_payment_type_keyboard(),
+                self._build_expense_entry_prompt(
+                    context,
+                    note="Chiqimni misoldagidek kiriting. Masalan: Mirshod Dastafka -- 10 000",
+                ),
+                reply_markup=self._build_expense_entry_keyboard(),
             )
             return REPORT_EXPENSES
-        except ValueError:
-            await update.message.reply_text(self._invalid_amount_msg(context))
-            return REPORT_EXPENSES
+
+        self._expense_items(context).append(item)
+        await update.message.reply_text(
+            self._build_expense_entry_prompt(context, note="Chiqim qo'shildi."),
+            reply_markup=self._build_expense_entry_keyboard(),
+        )
+        return REPORT_EXPENSES
 
     async def report_uzcard(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Get Uzcard amount"""
@@ -3792,7 +3911,7 @@ class SardobaBot:
         return [
             ('sales_amount', "Savdo summasi", "Р В Р Р‹Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В° Р В РЎвЂ”Р РЋР вЂљР В РЎвЂўР В РўвЂР В Р’В°Р В Р’В¶", REPORT_SALES, "Bugungi savdo miqdorini kiriting (summa):", "Р В РІР‚в„ўР В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР РЋРЎвЂњ Р В РЎвЂ”Р РЋР вЂљР В РЎвЂўР В РўвЂР В Р’В°Р В Р’В¶:"),
             ('debt_received', "Kelgan qarzlar", "Р В РЎСџР РЋР вЂљР В РЎвЂР РЋРІвЂљВ¬Р В Р’ВµР В РўвЂР РЋРІвЂљВ¬Р В РЎвЂР В Р’Вµ Р В РўвЂР В РЎвЂўР В Р’В»Р В РЎвЂ“Р В РЎвЂ", REPORT_DEBT_RECEIVED, "Kelgan qarzlarni kiriting (summa):", "Р В РІР‚в„ўР В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р В РЎвЂ”Р РЋР вЂљР В РЎвЂР РЋРІвЂљВ¬Р В Р’ВµР В РўвЂР РЋРІвЂљВ¬Р В РЎвЂР В Р’Вµ Р В РўвЂР В РЎвЂўР В Р’В»Р В РЎвЂ“Р В РЎвЂ (Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В°):"),
-            ('expenses', "Chiqimlar", "Р В Р’В Р В Р’В°Р РЋР С“Р РЋРІР‚В¦Р В РЎвЂўР В РўвЂР РЋРІР‚в„–", REPORT_EXPENSES, "Chiqimlarni kiriting (summa):", "Р В РІР‚в„ўР В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋР вЂљР В Р’В°Р РЋР С“Р РЋРІР‚В¦Р В РЎвЂўР В РўвЂР РЋРІР‚в„– (Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В°):"),
+            ('expenses', "Chiqimlar", "Р В Р’В Р В Р’В°Р РЋР С“Р РЋРІР‚В¦Р В РЎвЂўР В РўвЂР РЋРІР‚в„–", REPORT_EXPENSES, "Chiqim sababini kiriting.\nMasalan:\nMirshod Dastafka -- 10 000\nUlug Paynet -- 100 000\n\nAgar chiqim bo'lmasa, Yakunlashni bosing.", "Р В РІР‚в„ўР В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Ռ Վ…Р В ՐВ°Р РЋՌ…Ռ Վ…Ռ В ӮՌ Վ…Ռ РЋРІР‚в„–Р РЋՌ…Р РЋРІР‚В° Ռ Ր…Ռ Վ…Ռ В ӮՌ РЋՌ…Р В ӨՌ Վ…Ռ В ��."),
             ('uzcard_amount', "Uzcard summasi", "Uzcard Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В°", REPORT_UZCARD, "Uzcard orqali kiritilgan summani kiriting (summa):", "Р В РІР‚в„ўР В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР РЋРЎвЂњ Р В РЎвЂ”Р В РЎвЂў Uzcard (Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В°):"),
             ('humo_amount', "Humo summasi", "Humo Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В°", REPORT_HUMO, "Humo orqali kiritilgan summani kiriting (summa):", "Р В РІР‚в„ўР В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР РЋРЎвЂњ Р В РЎвЂ”Р В РЎвЂў Humo (Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В°):"),
             ('p2p_amount', "P2P summasi", "P2P Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В°", REPORT_P2P, "P2P orqali kiritilgan summani kiriting (summa):", "Р В РІР‚в„ўР В Р вЂ Р В Р’ВµР В РўвЂР В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР РЋРЎвЂњ Р В РЎвЂ”Р В РЎвЂў P2P (Р РЋР С“Р РЋРЎвЂњР В РЎВР В РЎВР В Р’В°):"),
@@ -4003,6 +4122,14 @@ class SardobaBot:
         context.user_data['pending_sverka_key'] = key
         context.user_data['pending_sverka_state'] = state
         prompt = prompt_uz if 'uz' == 'uz' else prompt_ru
+        if key == "expenses":
+            context.user_data["expense_detail_stage"] = "items"
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=self._build_expense_entry_prompt(context),
+                reply_markup=self._build_expense_entry_keyboard(),
+            )
+            return state
         await context.bot.send_message(chat_id=query.message.chat_id, text=prompt, reply_markup=ReplyKeyboardRemove())
         return state
 

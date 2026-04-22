@@ -272,18 +272,17 @@ def test_build_shift_summary_message_includes_expense_detail():
             "debt_refunds": 0,
             "report_data": {
                 "expense_detail": {
-                    "payment_type": "P2P",
-                    "paid_to": "Yetkazib beruvchi",
-                    "recipient_name": "Abror",
-                    "recipient_phone": "+998901234567",
-                    "reason": "Muz uchun to'lov",
+                    "items": [
+                        {"text": "Mirshod Dastafka -- 10 000", "amount": 10_000},
+                        {"text": "Ulug Paynet -- 190 000", "amount": 190_000},
+                    ]
                 }
             },
         }
     )
     assert "📌 Chiqim tafsiloti" in text
-    assert "💳 To'lov turi: P2P" in text
-    assert "📝 Sabab: Muz uchun to'lov" in text
+    assert "• Mirshod Dastafka -- 10 000" in text
+    assert "• Ulug Paynet -- 190 000" in text
 
 
 def test_build_shift_summary_message_includes_debt_received_detail():
@@ -445,11 +444,10 @@ async def test_save_daily_report_persists_expense_detail_json():
             "other_payments": 0,
             "debt_payments": 0,
             "debt_refunds": 0,
-            "expense_payment_type": "P2P",
-            "expense_paid_to": "Yetkazib beruvchi",
-            "expense_recipient_name": "Abror",
-            "expense_recipient_phone": "+998901234567",
-            "expense_reason": "Muz uchun to'lov",
+            "expense_items": [
+                {"text": "Mirshod Dastafka -- 10 000", "amount": 10_000},
+                {"text": "Ulug Paynet -- 110 000", "amount": 110_000},
+            ],
         }
     )
 
@@ -458,8 +456,8 @@ async def test_save_daily_report_persists_expense_detail_json():
     query, params = fake_db.execute_calls[0]
     assert "report_data" in query
     payload = json.loads(params["report_data"])
-    assert payload["expense_detail"]["payment_type"] == "P2P"
-    assert payload["expense_detail"]["recipient_phone"] == "+998901234567"
+    assert payload["expense_detail"]["items"][0]["text"] == "Mirshod Dastafka -- 10 000"
+    assert payload["expense_detail"]["items"][1]["amount"] == 110000
 
 
 @pytest.mark.asyncio
@@ -687,40 +685,52 @@ async def test_report_debt_received_zero_skips_payment_type():
 
 
 @pytest.mark.asyncio
-async def test_report_expenses_positive_amount_requests_detail():
+async def test_report_expenses_collects_entry_and_shows_action_keyboard():
     bot = make_bot()
-    update, message = make_text_update("120000")
+    update, message = make_text_update("Mirshod Dastafka -- 10 000")
     context = SimpleNamespace(
-        user_data={"pending_sverka_key": "expenses", "pending_sverka_state": REPORT_EXPENSES}
+        user_data={
+            "pending_sverka_key": "expenses",
+            "pending_sverka_state": REPORT_EXPENSES,
+            "expense_detail_stage": "items",
+        }
     )
 
     state = await bot.report_expenses(update, context)
 
     assert state == REPORT_EXPENSES
-    assert context.user_data["expenses"] == 120000
-    assert context.user_data["expense_detail_stage"] == "payment_type"
+    assert context.user_data["expense_items"] == [
+        {"text": "Mirshod Dastafka -- 10 000", "amount": 10_000}
+    ]
+    assert "expenses" not in context.user_data
+    assert context.user_data["expense_detail_stage"] == "items"
     assert isinstance(message.replies[-1]["reply_markup"], ReplyKeyboardMarkup)
-    assert "To'lov turini tanlang" in message.replies[-1]["text"]
+    assert "Chiqim qo'shildi." in message.replies[-1]["text"]
+    assert "Jami chiqim: 10 000" in message.replies[-1]["text"]
 
 
 @pytest.mark.asyncio
-async def test_report_expenses_collects_detail_and_returns_to_sverka():
+async def test_report_expenses_finishes_and_returns_to_sverka():
     bot = make_bot()
     bot._after_sverka_step = AsyncMock(return_value=SUBMIT_DAILY_REPORT)
     context = SimpleNamespace(
-        user_data={"pending_sverka_key": "expenses", "pending_sverka_state": REPORT_EXPENSES}
+        user_data={
+            "pending_sverka_key": "expenses",
+            "pending_sverka_state": REPORT_EXPENSES,
+            "expense_detail_stage": "items",
+        }
     )
 
-    await bot.report_expenses(make_text_update("120000")[0], context)
-    await bot.report_expenses(make_text_update("P2P")[0], context)
-    await bot.report_expenses(make_text_update("Yetkazib beruvchi")[0], context)
-    await bot.report_expenses(make_text_update("Abror")[0], context)
-    await bot.report_expenses(make_text_update("+998901234567")[0], context)
-    state = await bot.report_expenses(make_text_update("Muz uchun to'lov")[0], context)
+    await bot.report_expenses(make_text_update("Mirshod Dastafka -- 10 000")[0], context)
+    await bot.report_expenses(make_text_update("Ulug Paynet -- 100 000")[0], context)
+    state = await bot.report_expenses(make_text_update("Yakunlash")[0], context)
 
     assert state == SUBMIT_DAILY_REPORT
-    assert context.user_data["expense_payment_type"] == "P2P"
-    assert context.user_data["expense_reason"] == "Muz uchun to'lov"
+    assert context.user_data["expenses"] == 110_000
+    assert context.user_data["expense_items"] == [
+        {"text": "Mirshod Dastafka -- 10 000", "amount": 10_000},
+        {"text": "Ulug Paynet -- 100 000", "amount": 100_000},
+    ]
     assert "expense_detail_stage" not in context.user_data
     bot._after_sverka_step.assert_awaited_once()
 
@@ -843,6 +853,24 @@ async def test_show_sverka_menu_includes_cancel_button():
     labels = [button.text for row in markup.inline_keyboard for button in row]
     assert "🟢 Yakunlash" in labels
     assert "❌ Bekor qilish" in labels
+
+
+@pytest.mark.asyncio
+async def test_sverka_expenses_step_shows_entry_keyboard():
+    bot = make_bot()
+    query = SimpleNamespace(data="sv:expenses", message=SimpleNamespace(chat_id=99), answer=AsyncMock())
+    update = SimpleNamespace(callback_query=query)
+    context = SimpleNamespace(user_data={"sverka_status": {}}, bot=SimpleNamespace(send_message=AsyncMock()))
+
+    state = await bot.sverka_select_step(update, context)
+
+    assert state == REPORT_EXPENSES
+    assert context.user_data["pending_sverka_key"] == "expenses"
+    assert context.user_data["expense_detail_stage"] == "items"
+    kwargs = context.bot.send_message.await_args.kwargs
+    assert isinstance(kwargs["reply_markup"], ReplyKeyboardMarkup)
+    assert "Chiqim sababini kiriting." in kwargs["text"]
+    assert "Yakunlashni bosing" in kwargs["text"]
 
 
 @pytest.mark.asyncio
@@ -1570,6 +1598,15 @@ async def test_close_shift_sends_only_text_to_group_without_excel_exports():
             "location": "Sardoba",
             "closing_amount": 350000,
             "closed_at": "2026-04-17 12:10:00",
+            "expenses": 110_000,
+            "report_data": {
+                "expense_detail": {
+                    "items": [
+                        {"text": "Mirshod Dastafka -- 10 000", "amount": 10_000},
+                        {"text": "Ulug Paynet -- 100 000", "amount": 100_000},
+                    ]
+                }
+            },
         }
     )
     bot._send_group_message = AsyncMock(return_value=True)
@@ -1591,7 +1628,10 @@ async def test_close_shift_sends_only_text_to_group_without_excel_exports():
     assert "🔒 Smena yopildi" in sent_text
     assert "👤 Kassir: Ali Valiyev" in sent_text
     assert "💰 Yopish summasi: 350 000" in sent_text
-    assert sent_text.strip().endswith("📝 Izoh: Hammasi joyida, kassa topshirildi.")
+    assert "📝 Izoh: Hammasi joyida, kassa topshirildi." in sent_text
+    assert "📉 Chiqim: 110 000" in sent_text
+    assert "• Mirshod Dastafka -- 10 000" in sent_text
+    assert "• Ulug Paynet -- 100 000" in sent_text
     bot._send_group_document.assert_not_awaited()
     assert message.replies[-1]["text"] == "Smena yopildi."
     bot.show_cashier_menu.assert_awaited_once_with(note_update, context)
