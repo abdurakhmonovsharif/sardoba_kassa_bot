@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 import asyncio
 import json
 import logging
@@ -137,7 +137,7 @@ class SardobaBot:
     def _build_expense_entry_keyboard(self) -> ReplyKeyboardMarkup:
         """Create a keyboard for multi-entry expense collection."""
         return ReplyKeyboardMarkup(
-            [[KeyboardButton("Yana qo'shish"), KeyboardButton("Yakunlash")]],
+            [[KeyboardButton("➕ Yana qo'shish"), KeyboardButton("✅ Yakunlash")]],
             resize_keyboard=True,
         )
 
@@ -326,7 +326,9 @@ class SardobaBot:
     def _normalize_expense_action(self, text: str) -> Optional[str]:
         normalized = (text or "").strip().lower()
         return {
+            "➕ yana qo'shish": "add_more",
             "yana qo'shish": "add_more",
+            "✅ yakunlash": "finish",
             "yakunlash": "finish",
         }.get(normalized)
 
@@ -360,8 +362,71 @@ class SardobaBot:
             "debt_payments_payment_type",
             "debt_payments_counterparty_name",
             "debt_payments_counterparty_phone",
+            "debt_payments_current_name",
+            "debt_payments_current_phone",
+            "debt_payments_current_amount",
+            "debt_payments_items",
         ):
             context.user_data.pop(key, None)
+
+    def _debt_payments_items(self, context: ContextTypes.DEFAULT_TYPE) -> list[dict]:
+        items = context.user_data.get("debt_payments_items")
+        if not isinstance(items, list):
+            items = []
+            context.user_data["debt_payments_items"] = items
+        return items
+
+    def _debt_payments_items_total(self, context: ContextTypes.DEFAULT_TYPE) -> float:
+        total = 0.0
+        for item in self._debt_payments_items(context):
+            try:
+                total += float(item.get("amount") or 0)
+            except Exception:
+                continue
+        return total
+
+    def _build_debt_payments_loop_keyboard(self) -> ReplyKeyboardMarkup:
+        return ReplyKeyboardMarkup(
+            [[KeyboardButton("➕ Yana qo'shish"), KeyboardButton("✅ Yakunlash")]],
+            resize_keyboard=True,
+        )
+
+    def _build_debt_payments_confirm_text(self, context: ContextTypes.DEFAULT_TYPE) -> str:
+        name = context.user_data.get("debt_payments_current_name", "-")
+        phone = context.user_data.get("debt_payments_current_phone", "-")
+        amount = context.user_data.get("debt_payments_current_amount", 0)
+        return (
+            "📋 Qarz berish ma'lumotlarini tekshiring:\n\n"
+            f"👤 Ism: {name}\n"
+            f"📞 Telefon: {phone}\n"
+            f"💰 Summa: {self._fmt_money(amount)}\n\n"
+            "Tasdiqlash uchun \"Qarz berildi\" tugmasini bosing."
+        )
+
+    def _build_debt_payments_confirm_keyboard(self) -> ReplyKeyboardMarkup:
+        return ReplyKeyboardMarkup(
+            [[KeyboardButton("✅ Qarz berildi"), KeyboardButton("❌ Bekor qilish")]],
+            resize_keyboard=True,
+        )
+
+    def _normalize_debt_payments_action(self, text: str) -> Optional[str]:
+        normalized = (text or "").strip().lower()
+        return {
+            "➕ yana qo'shish": "add_more",
+            "yana qo'shish": "add_more",
+            "✅ yakunlash": "finish",
+            "yakunlash": "finish",
+        }.get(normalized)
+
+    def _normalize_debt_payments_confirm(self, text: str) -> Optional[str]:
+        normalized = (text or "").strip().lower()
+        return {
+            "✅ qarz berildi": "confirm",
+            "qarz berildi": "confirm",
+            "❌ bekor qilish": "cancel",
+            "bekor qilish": "cancel",
+        }.get(normalized)
+
 
     def _clear_expense_detail_state(
         self,
@@ -574,16 +639,21 @@ class SardobaBot:
                 payload["debt_received_detail"] = debt_received_detail
 
         if float(context.user_data.get("debt_payments") or 0) > 0:
-            debt_payments_detail = {
-                "counterparty_name": context.user_data.get("debt_payments_counterparty_name"),
-                "counterparty_phone": context.user_data.get("debt_payments_counterparty_phone"),
-                "payment_type": context.user_data.get("debt_payments_payment_type"),
-            }
-            debt_payments_detail = {
-                key: value for key, value in debt_payments_detail.items() if value not in (None, "")
-            }
-            if debt_payments_detail:
-                payload["debt_payments_detail"] = debt_payments_detail
+            items = context.user_data.get("debt_payments_items")
+            if isinstance(items, list) and items:
+                payload["debt_payments_detail"] = {"items": items}
+            else:
+                # Legacy single-entry fallback
+                debt_payments_detail = {
+                    "counterparty_name": context.user_data.get("debt_payments_counterparty_name"),
+                    "counterparty_phone": context.user_data.get("debt_payments_counterparty_phone"),
+                    "payment_type": context.user_data.get("debt_payments_payment_type"),
+                }
+                debt_payments_detail = {
+                    key: value for key, value in debt_payments_detail.items() if value not in (None, "")
+                }
+                if debt_payments_detail:
+                    payload["debt_payments_detail"] = debt_payments_detail
 
         if float(context.user_data.get("expenses") or 0) > 0:
             expense_items = []
@@ -657,6 +727,22 @@ class SardobaBot:
         if not isinstance(detail, dict) or not detail:
             return []
 
+        items = detail.get("items")
+        if isinstance(items, list) and items:
+            lines = ["📌 Qarz berilganlar tafsiloti"]
+            for idx, item in enumerate(items, 1):
+                if not isinstance(item, dict):
+                    continue
+                lines.append(f"  {idx}. 👤 {item.get('counterparty_name', '-')}")
+                if item.get("counterparty_phone"):
+                    lines.append(f"     📞 {item['counterparty_phone']}")
+                if item.get("amount"):
+                    lines.append(f"     💰 {self._fmt_money(item['amount'])}")
+                if item.get("check_image"):
+                    lines.append("     🧾 Chek rasmi biriktilgan")
+            return lines
+
+        # Legacy single-entry format
         lines = ["📌 Qarz to'lovi tafsiloti"]
         if detail.get("counterparty_name"):
             lines.append(f"👤 Kimga: {detail['counterparty_name']}")
@@ -1479,6 +1565,10 @@ class SardobaBot:
                 if handler:
                     await handler(update, context)
                 return
+            # Fallback: debt_payments multi-step davom etayotgan bo'lsa (ConversationHandler state yo'qolgan)
+            if context.user_data.get('flow') == 'sverka' and context.user_data.get('debt_payments_detail_stage'):
+                await self.report_debt_payments(update, context)
+                return
             if context.user_data.get('flow') == 'edit' and context.user_data.get('pending_edit_key'):
                 await self.edit_reports_value(update, context)
                 return
@@ -1628,6 +1718,11 @@ class SardobaBot:
                 await self.upload_receipt_roll(update, context)
                 return
 
+        # Fallback: Qarz berish chek rasmi (ConversationHandler state yo'qolgan bo'lsa)
+        if flow == 'sverka' and context.user_data.get('debt_payments_detail_stage') == 'check_image':
+            await self.report_debt_payments(update, context)
+            return
+
     async def handle_admin_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE, user):
         """Handle admin commands"""
         text = (update.message.text or "").strip()
@@ -1646,7 +1741,7 @@ class SardobaBot:
         if text:
             normalized = text.strip()
             lower = normalized.lower()
-            if lower.startswith(("approve ", "tasdiq ", "tasdiqlash ", "confirm ", "accept ", "odobrit ", "Р В Р’В Р РЋРІР‚СћР В Р’В Р СћРІР‚ВР В Р’В Р РЋРІР‚СћР В Р’В Р вЂ™Р’В±Р В Р Р‹Р В РІР‚С™ ")):
+            if lower.startswith(("approve ", "tasdiq ", "tasdiqlash ", "confirm ", "accept ", "odobrit ", "Р В Р’В Р РЋРІР‚СћР В Р’В Р СћРІР‚В˜Р В Р’В Р РЋРІР‚СћР В Р’В Р вЂ™Р’В±Р В Р Р‹Р В РІР‚С™ ")):
                 target_id = self._extract_telegram_id(normalized)
                 if target_id:
                     await self.approve_cashier(update, context, target_id)
@@ -1777,26 +1872,14 @@ class SardobaBot:
         lang = 'uz'
         user_row = await self.db.fetch_one("SELECT id FROM users WHERE telegram_id = %s", (update.effective_user.id,))
         if user_row:
-            today_shift = await self._today_shift_for_user(user_row['id'])
-            if today_shift:
-                if bool(today_shift.get('is_open')):
-                    await update.message.reply_text("Sizda bugungi ochiq smena bor. Avval o'sha smenani yoping.")
-                else:
-                    await update.message.reply_text(
-                        "Siz bugungi smenani allaqachon yopgansiz. Bir kunda faqat 1 ta smena ochiladi."
-                    )
-                return MAIN_MENU
-
+            # Only block if the user currently has an ACTIVE open shift.
+            # A previously closed shift does NOT prevent opening a new one.
             active_shift = await self.db.fetch_one(
                 "SELECT id FROM shifts WHERE user_id=%s AND is_open=TRUE ORDER BY id DESC LIMIT 1",
                 (user_row['id'],)
             )
             if active_shift:
-                if lang == 'uz':
-                    msg = "Sizda ochiq smena bor. Avval yopishingiz kerak."
-                else:
-                    msg = "Р В Р’В Р В РІвЂљВ¬ Р В Р’В Р В РІР‚В Р В Р’В Р вЂ™Р’В°Р В Р Р‹Р В РЎвЂњ Р В Р Р‹Р РЋРІР‚СљР В Р’В Р вЂ™Р’В¶Р В Р’В Р вЂ™Р’Вµ Р В Р’В Р вЂ™Р’ВµР В Р Р‹Р В РЎвЂњР В Р Р‹Р Р†Р вЂљРЎв„ўР В Р Р‹Р В Р вЂ° Р В Р’В Р РЋРІР‚СћР В Р Р‹Р Р†Р вЂљРЎв„ўР В Р’В Р РЋРІР‚СњР В Р Р‹Р В РІР‚С™Р В Р Р‹Р Р†Р вЂљРІвЂћвЂ“Р В Р Р‹Р Р†Р вЂљРЎв„ўР В Р’В Р вЂ™Р’В°Р В Р Р‹Р В Р РЏ Р В Р Р‹Р В РЎвЂњР В Р’В Р РЋР’ВР В Р’В Р вЂ™Р’ВµР В Р’В Р В РІР‚В¦Р В Р’В Р вЂ™Р’В°. Р В Р’В Р В Р вЂ№Р В Р’В Р В РІР‚В¦Р В Р’В Р вЂ™Р’В°Р В Р Р‹Р Р†Р вЂљР Р‹Р В Р’В Р вЂ™Р’В°Р В Р’В Р вЂ™Р’В»Р В Р’В Р вЂ™Р’В° Р В Р’В Р вЂ™Р’В·Р В Р’В Р вЂ™Р’В°Р В Р’В Р РЋРІР‚СњР В Р Р‹Р В РІР‚С™Р В Р’В Р РЋРІР‚СћР В Р’В Р Р†РІР‚С›РІР‚вЂњР В Р Р‹Р Р†Р вЂљРЎв„ўР В Р’В Р вЂ™Р’Вµ Р В Р’В Р вЂ™Р’ВµР В Р Р‹Р Р†Р вЂљР’В."
-                await update.message.reply_text(msg)
+                await update.message.reply_text("Sizda hozirda ochiq smena bor. Avval o'sha smenani yoping.")
                 return MAIN_MENU
         
         context.user_data['workplace_status_uploaded_ids'] = []
@@ -1822,13 +1905,28 @@ class SardobaBot:
             try:
                 user_row = await self.db.fetch_one("SELECT id FROM users WHERE telegram_id = %s", (update.effective_user.id,))
                 if user_row:
-                    today_shift = await self._today_shift_for_user(user_row['id'])
-                    if today_shift:
-                        if bool(today_shift.get('is_open')):
-                            await update.message.reply_text("Sizda bugungi ochiq smena bor. Avval yoping.")
+                    today = self._now_tashkent().date().isoformat()
+                    start_bound, end_bound = self._day_bounds(today)
+
+                    # Block if the location already has any shift today (open or closed)
+                    location_today_shift = await self.db.fetch_one(
+                        """
+                        SELECT id, is_open FROM shifts
+                        WHERE location_id=%s AND opened_at >= %s AND opened_at < %s
+                        ORDER BY id DESC LIMIT 1
+                        """,
+                        (location_id, start_bound, end_bound)
+                    )
+                    if location_today_shift:
+                        if bool(location_today_shift.get('is_open')):
+                            await update.message.reply_text(
+                                "Bu filialda hozirda ochiq smena mavjud. "
+                                "Avval o'sha smenani yoping."
+                            )
                         else:
                             await update.message.reply_text(
-                                "Siz bugungi smenani allaqachon yopgansiz. Qayta ochib bo'lmaydi."
+                                "Bu filialda bugun smena allaqachon ochilgan va yopilgan. "
+                                "Bir kunda bir filial uchun faqat 1 ta smena ochiladi."
                             )
                         await self.show_cashier_menu(update, context)
                         context.user_data['flow'] = None
@@ -2416,42 +2514,141 @@ class SardobaBot:
         return await self._after_sverka_step(update, context)
 
     async def report_debt_payments(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Get debt payments amount"""
+        """Qarz berish: Summa → Ism → Telefon → Tasdiqlash → Chek rasmi → Loop"""
         stage = context.user_data.get("debt_payments_detail_stage")
+        has_photo = bool(update.message.photo) if update.message else False
+        has_doc = bool(update.message.document) if update.message else False
+        text = (update.message.text or "").strip() if update.message and update.message.text else ""
+        logger.info(
+            "report_debt_payments called: stage=%s, has_photo=%s, has_doc=%s, text=%r",
+            stage, has_photo, has_doc, text[:50] if text else "",
+        )
+
+        # --- Stage: counterparty_name ---
         if stage == "counterparty_name":
-            name = (update.message.text or "").strip()
-            if not name:
-                await update.message.reply_text("Kimga berilganini kiriting (ism).")
+            if not text:
+                await update.message.reply_text("Qarzdor ismini kiriting.")
                 return REPORT_DEBT_PAYMENTS
-            context.user_data["debt_payments_counterparty_name"] = name
+            context.user_data["debt_payments_current_name"] = text
             context.user_data["debt_payments_detail_stage"] = "counterparty_phone"
             await update.message.reply_text("Telefon raqamini kiriting.")
             return REPORT_DEBT_PAYMENTS
+
+        # --- Stage: counterparty_phone ---
         if stage == "counterparty_phone":
-            phone = (update.message.text or "").strip()
-            if not validate_phone_number(phone):
+            if not validate_phone_number(text):
                 await update.message.reply_text("Iltimos, to'g'ri telefon raqamini kiriting.")
                 return REPORT_DEBT_PAYMENTS
-            context.user_data["debt_payments_counterparty_phone"] = phone
-            context.user_data.pop("debt_payments_detail_stage", None)
-            context.user_data.pop('pending_sverka_key', None)
-            context.user_data.pop('pending_sverka_state', None)
-            self._mark_sverka_done(context, 'debt_payments')
-            await update.message.reply_text("Ma'lumotlar qabul qilindi.", reply_markup=ReplyKeyboardRemove())
-            return await self._after_sverka_step(update, context)
+            context.user_data["debt_payments_current_phone"] = text
+            context.user_data["debt_payments_detail_stage"] = "confirm"
+            await update.message.reply_text(
+                self._build_debt_payments_confirm_text(context),
+                reply_markup=self._build_debt_payments_confirm_keyboard(),
+            )
+            return REPORT_DEBT_PAYMENTS
+
+        # --- Stage: confirm ---
+        if stage == "confirm":
+            action = self._normalize_debt_payments_confirm(text)
+            if action == "cancel":
+                context.user_data.pop("debt_payments_current_name", None)
+                context.user_data.pop("debt_payments_current_phone", None)
+                context.user_data.pop("debt_payments_current_amount", None)
+                context.user_data.pop("debt_payments_detail_stage", None)
+                await update.message.reply_text(
+                    "Bekor qilindi. Summani qayta kiriting yoki 0 kiriting.",
+                    reply_markup=ReplyKeyboardRemove(),
+                )
+                return REPORT_DEBT_PAYMENTS
+            if action == "confirm":
+                context.user_data["debt_payments_detail_stage"] = "check_image"
+                await update.message.reply_text(
+                    "📸 To'lov/qarz cheki rasmini yuboring.",
+                    reply_markup=ReplyKeyboardRemove(),
+                )
+                return REPORT_DEBT_PAYMENTS
+            await update.message.reply_text(
+                "Iltimos, tugmalardan birini tanlang.",
+                reply_markup=self._build_debt_payments_confirm_keyboard(),
+            )
+            return REPORT_DEBT_PAYMENTS
+
+        # --- Stage: check_image (photo handler) ---
+        if stage == "check_image":
+            photo = update.message.photo
+            document = update.message.document if not photo else None
+            if not photo and not document:
+                await update.message.reply_text("Iltimos, chek rasmini yuboring (rasm yoki fayl).")
+                return REPORT_DEBT_PAYMENTS
+            if photo:
+                file_id = photo[-1].file_id
+            else:
+                file_id = document.file_id
+            item = {
+                "counterparty_name": context.user_data.get("debt_payments_current_name", ""),
+                "counterparty_phone": context.user_data.get("debt_payments_current_phone", ""),
+                "amount": context.user_data.get("debt_payments_current_amount", 0),
+                "check_image": file_id,
+            }
+            self._debt_payments_items(context).append(item)
+            context.user_data.pop("debt_payments_current_name", None)
+            context.user_data.pop("debt_payments_current_phone", None)
+            context.user_data.pop("debt_payments_current_amount", None)
+            context.user_data["debt_payments"] = self._debt_payments_items_total(context)
+            context.user_data["debt_payments_detail_stage"] = "loop"
+            items = self._debt_payments_items(context)
+            summary_lines = ["✅ Chek rasmi qabul qilindi!\n", "Kiritilgan qarzlar:"]
+            for idx, it in enumerate(items, 1):
+                summary_lines.append(
+                    f"  {idx}. {it.get('counterparty_name', '-')} — "
+                    f"{self._fmt_money(it.get('amount', 0))}"
+                )
+            summary_lines.append(f"\nJami: {self._fmt_money(self._debt_payments_items_total(context))}")
+            await update.message.reply_text(
+                "\n".join(summary_lines),
+                reply_markup=self._build_debt_payments_loop_keyboard(),
+            )
+            return REPORT_DEBT_PAYMENTS
+
+        # --- Stage: loop ---
+        if stage == "loop":
+            action = self._normalize_debt_payments_action(text)
+            if action == "add_more":
+                context.user_data["debt_payments_detail_stage"] = None
+                await update.message.reply_text(
+                    "Yangi qarzdor uchun summani kiriting:",
+                    reply_markup=ReplyKeyboardRemove(),
+                )
+                return REPORT_DEBT_PAYMENTS
+            if action == "finish":
+                context.user_data.pop("debt_payments_detail_stage", None)
+                context.user_data.pop("pending_sverka_key", None)
+                context.user_data.pop("pending_sverka_state", None)
+                self._mark_sverka_done(context, "debt_payments")
+                await update.message.reply_text(
+                    "Qarz berish ma'lumotlari saqlandi.",
+                    reply_markup=ReplyKeyboardRemove(),
+                )
+                return await self._after_sverka_step(update, context)
+            await update.message.reply_text(
+                "Iltimos, tugmalardan birini tanlang.",
+                reply_markup=self._build_debt_payments_loop_keyboard(),
+            )
+            return REPORT_DEBT_PAYMENTS
+
+        # --- Initial stage: amount entry ---
         try:
-            amount = self._parse_amount(update.message.text)
-            context.user_data['debt_payments'] = amount
+            amount = self._parse_amount(text)
             if amount <= 0:
                 self._clear_debt_payments_detail_state(context)
-                context.user_data.pop('pending_sverka_key', None)
-                context.user_data.pop('pending_sverka_state', None)
-                self._mark_sverka_done(context, 'debt_payments')
+                context.user_data["debt_payments"] = 0
+                context.user_data.pop("pending_sverka_key", None)
+                context.user_data.pop("pending_sverka_state", None)
+                self._mark_sverka_done(context, "debt_payments")
                 return await self._after_sverka_step(update, context)
-
-            self._clear_debt_payments_detail_state(context)
+            context.user_data["debt_payments_current_amount"] = amount
             context.user_data["debt_payments_detail_stage"] = "counterparty_name"
-            await update.message.reply_text("Qarzga berilgan to'lov kimga berildi? Ismini kiriting.")
+            await update.message.reply_text("Qarzdor ismini kiriting.")
             return REPORT_DEBT_PAYMENTS
         except ValueError:
             await update.message.reply_text(self._invalid_amount_msg(context))
@@ -3715,39 +3912,110 @@ class SardobaBot:
             logger.exception("Failed to send media album to %s", group_chat_id)
             return False
 
+    async def _add_image_label(self, bot, file_id: str, label: str) -> Optional[BytesIO]:
+        """Download a Telegram photo, stamp its type label in the bottom-right corner, return BytesIO."""
+        from PIL import ImageDraw, ImageFont
+        try:
+            tg_file = await bot.get_file(file_id)
+            buf = BytesIO()
+            await tg_file.download_to_memory(buf)
+            buf.seek(0)
+
+            img = PILImage.open(buf).convert("RGB")
+            draw = ImageDraw.Draw(img)
+
+            # Responsive font: ~3% of image width, minimum 20 px
+            font_size = max(20, img.width // 28)
+            font = None
+            for font_path in [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+                "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+                "/Library/Fonts/Arial Bold.ttf",
+                "/System/Library/Fonts/Helvetica.ttc",
+            ]:
+                try:
+                    font = ImageFont.truetype(font_path, font_size)
+                    break
+                except Exception:
+                    continue
+            if font is None:
+                font = ImageFont.load_default()
+
+            bbox = draw.textbbox((0, 0), label, font=font)
+            text_w = bbox[2] - bbox[0]
+            text_h = bbox[3] - bbox[1]
+            padding = max(8, font_size // 3)
+            margin = 16
+
+            rx0 = img.width - text_w - padding * 2 - margin
+            ry0 = img.height - text_h - padding * 2 - margin
+            rx1 = img.width - margin
+            ry1 = img.height - margin
+
+            draw.rectangle([rx0, ry0, rx1, ry1], fill=(0, 0, 0))
+            draw.text((rx0 + padding, ry0 + padding), label, font=font, fill=(255, 255, 255))
+
+            out = BytesIO()
+            img.save(out, format="JPEG", quality=90)
+            out.seek(0)
+            return out
+        except Exception:
+            logger.exception("_add_image_label failed: file_id=%s label=%s", file_id, label)
+            return None
+
     async def _flush_opening_group_photos(self, context: ContextTypes.DEFAULT_TYPE, shift_id: int) -> None:
+        """Send all opening photos as a single watermarked album to the group."""
         queue = context.user_data.get("pending_opening_group_photos")
-        if not isinstance(queue, list):
+        if not isinstance(queue, list) or not queue:
             context.user_data.pop("pending_opening_group_photos", None)
             return
 
-        grouped: dict[str, list[dict]] = {}
-        for item in queue:
-            image_title = item.get("image_title")
-            if not image_title or not item.get("file_id"):
-                continue
-            grouped.setdefault(str(image_title), []).append(item)
+        group_chat_id = await self._get_group_chat_id()
+        if not group_chat_id:
+            logger.warning("Opening photo album skipped: group_chat_id not configured")
+            context.user_data.pop("pending_opening_group_photos", None)
+            return
 
-        shift_meta = await self._get_shift_meta(shift_id)
-        for image_title, items in grouped.items():
-            caption = (
-                f"📷 {image_title}\n"
-                f"👤 Kassir: {shift_meta.get('cashier') or '-'}\n"
-                f"🏬 Filial: {shift_meta.get('location') or '-'}\n"
-                f"⏰ Vaqt: {self._format_telegram_time(items[0].get('event_time'))}\n"
-                f"🖼️ Soni: {len(items)} ta"
-            )
-            sent_album = await self._send_group_media_album(context, items, caption=caption)
-            if sent_album:
+        # Build one flat media list — all image types combined
+        media = []
+        upload_counter = 0
+        for item in queue:
+            file_id = item.get("file_id")
+            image_title = item.get("image_title", "")
+            media_kind = item.get("media_kind", "photo")
+            if not file_id:
                 continue
-            for item in items:
-                await self._send_group_shift_photo(
-                    context,
-                    shift_id,
-                    item.get("file_id"),
-                    image_title,
-                    event_time=item.get("event_time"),
-                )
+
+            if media_kind == "photo":
+                try:
+                    labeled_buf = await self._add_image_label(context.bot, file_id, image_title)
+                    if labeled_buf:
+                        fname = f"photo_{upload_counter}.jpg"
+                        upload_counter += 1
+                        raw_bytes = labeled_buf.getvalue()
+                        media.append(InputMediaPhoto(media=raw_bytes, filename=fname))
+                    else:
+                        media.append(InputMediaPhoto(media=file_id))
+                except Exception:
+                    logger.exception("Skipping image label for file_id=%s, using original", file_id)
+                    media.append(InputMediaPhoto(media=file_id))
+            else:
+                media.append(InputMediaDocument(media=file_id))
+
+        if not media:
+            context.user_data.pop("pending_opening_group_photos", None)
+            return
+
+        try:
+            # Telegram max = 10 per album; split automatically
+            for i in range(0, len(media), 10):
+                chunk = media[i : i + 10]
+                await context.bot.send_media_group(chat_id=group_chat_id, media=chunk)
+        except Exception:
+            logger.exception("Failed to send opening photo album to group %s", group_chat_id)
+
         context.user_data.pop("pending_opening_group_photos", None)
 
     async def _finalize_shift_opening_flow(
@@ -3770,9 +4038,13 @@ class SardobaBot:
             context.user_data.get('opening_amount', 0),
             context.user_data.get('opening_amount_time', ''),
         )
-        sent = await self._send_group_message(context, opening_message)
-        if sent and shift_id:
+
+        # 1. Send all photos as one watermarked album first
+        if shift_id:
             await self._flush_opening_group_photos(context, shift_id)
+
+        # 2. Then send the opening info text (appears below the album in group)
+        sent = await self._send_group_message(context, opening_message)
 
         await context.bot.send_message(chat_id=chat_id, text="Smena muvaffaqiyatli ochildi! Endi sverka jarayonini boshlang.")
         if not sent:
@@ -4854,8 +5126,16 @@ class SardobaBot:
 
 async def _global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Catch unexpected errors so the bot doesn't go silent."""
+    from telegram.error import Conflict, NetworkError
     try:
         err = getattr(context, "error", None)
+        # Conflict means another instance is running — log but don't spam users
+        if isinstance(err, Conflict):
+            logger.warning("Bot conflict: another instance is running. %s", err)
+            return
+        if isinstance(err, NetworkError):
+            logger.warning("Network error (transient): %s", err)
+            return
         if err:
             logger.exception("Unhandled exception", exc_info=err)
         else:
@@ -4873,6 +5153,19 @@ async def _global_error_handler(update: object, context: ContextTypes.DEFAULT_TY
 
 def main():
     """Run the bot."""
+    import fcntl
+    # --- PID lock: faqat bitta instance ishlashini ta'minlaydi ---
+    _PID_FILE = "/tmp/sardoba_kassa_bot.lock"
+    try:
+        _pid_fh = open(_PID_FILE, 'w')
+        fcntl.flock(_pid_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _pid_fh.write(str(os.getpid()))
+        _pid_fh.flush()
+    except BlockingIOError:
+        import sys
+        print("ERROR: Bot allaqachon ishlayapti! Avval eski jarayonni to'xtating.", flush=True)
+        sys.exit(1)
+
     # Create the Application and pass it your bot's token
     TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
     request = HTTPXRequest(connect_timeout=20.0, read_timeout=60.0, write_timeout=60.0, pool_timeout=20.0)
@@ -4967,7 +5260,10 @@ def main():
             REPORT_UZCARD_REFUND: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_uzcard_refund)],
             REPORT_HUMO_REFUND: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_humo_refund)],
             REPORT_OTHER_PAYMENTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_other_payments)],
-            REPORT_DEBT_PAYMENTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_debt_payments)],
+            REPORT_DEBT_PAYMENTS: [
+                MessageHandler(filters.PHOTO | filters.Document.ALL, bot.report_debt_payments),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_debt_payments),
+            ],
             REPORT_DEBT_REFUNDS: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_debt_refunds)],
             EDIT_REPORT_SELECT: [CallbackQueryHandler(bot.edit_reports_select, pattern='^edit:')],
             EDIT_REPORT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.edit_reports_value)],
@@ -5000,7 +5296,10 @@ def main():
     application.add_error_handler(_global_error_handler)
 
     # Run the bot until the user presses Ctrl-C
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,   # Eski/conflict xabarlarni o'chiradi
+    )
 
 
 if __name__ == '__main__':
