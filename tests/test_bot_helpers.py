@@ -24,6 +24,7 @@ from bot import (
     REPORT_OTHER_PAYMENTS,
     REPORT_P2P,
     REPORT_SALES,
+    REPORT_TAX_INFO,
     SUBMIT_DAILY_REPORT,
     UPLOAD_PAYMENT_IMAGE,
     UPLOAD_RECEIPT_ROLL,
@@ -80,6 +81,8 @@ class FakeMessage:
     def __init__(self, text=None, contact=None):
         self.text = text
         self.contact = contact
+        self.photo = []
+        self.document = None
         self.replies = []
         self.documents = []
 
@@ -149,7 +152,7 @@ def test_day_bounds_and_total_balance():
             "debt_refunds": 5,
         }
     )
-    assert total == 1595
+    assert total == 595
 
 
 def test_close_shift_progress_text_includes_percent_and_remaining():
@@ -247,6 +250,7 @@ def test_build_shift_summary_message_is_readable():
     assert "👤 Kassir: Nilufar G'afurova" in text
     assert "🧾 Sverka" in text
     assert "💳 P2P: 75 000" in text
+    assert "🧮 Naqd kutiladigan summa: 9 725 000" in text
 
 
 def test_build_shift_summary_message_includes_expense_detail():
@@ -275,7 +279,8 @@ def test_build_shift_summary_message_includes_expense_detail():
                     "items": [
                         {"text": "Mirshod Dastafka -- 10 000", "amount": 10_000},
                         {"text": "Ulug Paynet -- 190 000", "amount": 190_000},
-                    ]
+                    ],
+                    "cash_amount": 50_000,
                 }
             },
         }
@@ -283,6 +288,7 @@ def test_build_shift_summary_message_includes_expense_detail():
     assert "📌 Chiqim tafsiloti" in text
     assert "• Mirshod Dastafka -- 10 000" in text
     assert "• Ulug Paynet -- 190 000" in text
+    assert "💵 Naqd summa: 50 000" in text
 
 
 def test_build_shift_summary_message_includes_debt_received_detail():
@@ -315,6 +321,54 @@ def test_build_shift_summary_message_includes_debt_received_detail():
     )
     assert "📌 Kelgan qarz tafsiloti" in text
     assert "💳 To'lov turi: Naqd" in text
+
+
+def test_build_shift_summary_message_includes_debt_received_items():
+    bot = make_bot()
+    text = bot._build_shift_summary_message(
+        {
+            "first_name": "Ali",
+            "last_name": "Valiyev",
+            "location": "Sardoba",
+            "opened_at": "2026-03-28 09:27:21",
+            "closed_at": "2026-03-28 09:49:16",
+            "opening_amount": 3000,
+            "closing_amount": 100000,
+            "sales_amount": 0,
+            "debt_received": 80_000,
+            "expenses": 0,
+            "uzcard_amount": 0,
+            "humo_amount": 0,
+            "uzcard_refund": 0,
+            "humo_refund": 0,
+            "other_payments": 0,
+            "debt_payments": 0,
+            "debt_refunds": 0,
+            "report_data": {
+                "debt_received_detail": {
+                    "items": [
+                        {
+                            "counterparty_name": "Jamshid",
+                            "counterparty_phone": "+998901234567",
+                            "amount": 50_000,
+                            "payment_type": "P2P",
+                        },
+                        {
+                            "counterparty_name": "Sharif",
+                            "counterparty_phone": "+998931434413",
+                            "amount": 30_000,
+                            "payment_type": "Naqd",
+                        },
+                    ]
+                }
+            },
+        }
+    )
+    assert "📌 Kelgan qarzlar tafsiloti" in text
+    assert "1. 👤 Jamshid" in text
+    assert "💳 P2P" in text
+    assert "2. 👤 Sharif" in text
+    assert "💳 Naqd" in text
 
 
 def test_build_shift_summary_message_includes_debt_payments_detail():
@@ -350,6 +404,131 @@ def test_build_shift_summary_message_includes_debt_payments_detail():
     assert "📌 Qarz to'lovi tafsiloti" in text
     assert "👤 Kimga: Rustam" in text
     assert "💳 To'lov turi: P2P" in text
+
+
+def test_build_sverka_summary_message_can_use_closing_title_and_tax_info():
+    bot = make_bot()
+    text = bot._build_sverka_summary_message(
+        {
+            "first_name": "Ali",
+            "last_name": "Valiyev",
+            "location": "Sardoba",
+            "opened_at": "2026-03-28 09:27:21",
+            "sales_amount": 10_000,
+            "debt_received": 0,
+            "expenses": 0,
+            "uzcard_amount": 99_000,
+            "humo_amount": 88_000,
+            "p2p_amount": 77_000,
+            "uzcard_refund": 0,
+            "humo_refund": 0,
+            "other_payments": 0,
+            "debt_payments": 0,
+            "debt_refunds": 0,
+            "report_data": {
+                "tax_info": {
+                    "check_image": "file_tax",
+                    "cash_amount": 50_000,
+                }
+            },
+        },
+        title="🔒 Kassa yopilishi ma'lumotlari",
+        closing=True,
+    )
+
+    assert text.startswith("🔒 Kassa yopilishi ma'lumotlari")
+    assert "🧾 Soliq ma'lumotlari" in text
+    assert "💵 Naqd summa: 50 000" in text
+    assert "📷 Chek rasmi biriktirilgan" in text
+    assert "💳 Uzcard:" not in text
+    assert "💳 Humo:" not in text
+    assert "💳 P2P:" not in text
+    assert "🧮 Naqd kutiladigan summa: 10 000" in text
+
+
+def test_build_sverka_summary_message_includes_expected_cash_formula():
+    bot = make_bot()
+    text = bot._build_sverka_summary_message(
+        {
+            "first_name": "Ali",
+            "last_name": "Valiyev",
+            "location": "Sardoba",
+            "opened_at": "2026-03-28 09:27:21",
+            "sales_amount": 1_000,
+            "debt_received": 200,
+            "debt_refunds": 5,
+            "expenses": 50,
+            "uzcard_amount": 100,
+            "humo_amount": 300,
+            "p2p_amount": 60,
+            "uzcard_refund": 20,
+            "humo_refund": 10,
+            "other_payments": 40,
+            "debt_payments": 30,
+            "report_data": {},
+        }
+    )
+
+    assert "🧮 Naqd kutiladigan summa: 595" in text
+
+
+def test_decorate_debt_payment_check_image_adds_header_and_border():
+    bot = make_bot()
+    raw = BytesIO()
+    PILImage.new("RGB", (320, 180), (240, 240, 240)).save(raw, format="JPEG")
+
+    decorated = bot._decorate_debt_payment_check_image(raw.getvalue(), 7, "Sharif")
+    image = PILImage.open(decorated)
+
+    assert image.width > 320
+    assert image.height > 180
+    assert image.getpixel((10, 10)) == (20, 20, 20)
+
+
+def test_decorate_tax_info_check_image_adds_header_and_border():
+    bot = make_bot()
+    raw = BytesIO()
+    PILImage.new("RGB", (320, 180), (240, 240, 240)).save(raw, format="JPEG")
+
+    decorated = bot._decorate_tax_info_check_image(raw.getvalue(), 25_000)
+    image = PILImage.open(decorated)
+
+    assert image.width > 320
+    assert image.height > 180
+    assert image.getpixel((10, 10)) == (20, 20, 20)
+
+
+def test_decorate_tax_info_check_image_uses_only_left_title():
+    bot = make_bot()
+    expected = BytesIO(b"decorated")
+    bot._decorate_labeled_check_image = Mock(return_value=expected)
+
+    result = bot._decorate_tax_info_check_image(b"raw", 25_000)
+
+    assert result is expected
+    bot._decorate_labeled_check_image.assert_called_once_with(b"raw", "Soliq chek", "")
+
+
+@pytest.mark.asyncio
+async def test_add_image_label_uses_left_header_border_style():
+    class FakeTelegramFile:
+        async def download_to_memory(self, buf):
+            buf.write(b"raw-image")
+
+    bot = make_bot()
+    expected = BytesIO(b"decorated")
+    bot._decorate_labeled_check_image = Mock(return_value=expected)
+    fake_bot = SimpleNamespace(get_file=AsyncMock(return_value=FakeTelegramFile()))
+
+    result = await bot._add_image_label(fake_bot, "file_1", "Ish joyi holati rasmi")
+
+    assert result is expected
+    fake_bot.get_file.assert_awaited_once_with("file_1")
+    bot._decorate_labeled_check_image.assert_called_once_with(
+        b"raw-image",
+        "Ish joyi holati rasmi",
+        "",
+    )
 
 
 def test_parse_amount_accepts_zero_and_rejects_letters():
@@ -448,6 +627,7 @@ async def test_save_daily_report_persists_expense_detail_json():
                 {"text": "Mirshod Dastafka -- 10 000", "amount": 10_000},
                 {"text": "Ulug Paynet -- 110 000", "amount": 110_000},
             ],
+            "expense_cash_amount": 25_000,
         }
     )
 
@@ -458,6 +638,7 @@ async def test_save_daily_report_persists_expense_detail_json():
     payload = json.loads(params["report_data"])
     assert payload["expense_detail"]["items"][0]["text"] == "Mirshod Dastafka -- 10 000"
     assert payload["expense_detail"]["items"][1]["amount"] == 110000
+    assert payload["expense_detail"]["cash_amount"] == 25_000
 
 
 @pytest.mark.asyncio
@@ -486,6 +667,81 @@ async def test_save_daily_report_persists_debt_received_payment_type_json():
     _, params = fake_db.execute_calls[0]
     payload = json.loads(params["report_data"])
     assert payload["debt_received_detail"]["payment_type"] == "P2P"
+
+
+@pytest.mark.asyncio
+async def test_save_daily_report_persists_debt_received_items_json():
+    fake_db = FakeDB(fetch_one_results=[None])
+    bot = make_bot(fake_db)
+    context = SimpleNamespace(
+        user_data={
+            "current_shift_id": 5,
+            "sales_amount": 100,
+            "debt_received": 80_000,
+            "expenses": 0,
+            "uzcard_amount": 0,
+            "humo_amount": 0,
+            "uzcard_refund": 0,
+            "humo_refund": 0,
+            "other_payments": 0,
+            "debt_payments": 0,
+            "debt_refunds": 0,
+            "debt_received_items": [
+                {
+                    "counterparty_name": "Sharif",
+                    "counterparty_phone": "+998931434413",
+                    "amount": 10_000,
+                    "payment_type": "Naqd",
+                },
+                {
+                    "counterparty_name": "Jamshid",
+                    "counterparty_phone": "+998901234567",
+                    "amount": 70_000,
+                    "payment_type": "P2P",
+                },
+            ],
+        }
+    )
+
+    await bot.save_daily_report(None, context)
+
+    _, params = fake_db.execute_calls[0]
+    payload = json.loads(params["report_data"])
+    items = payload["debt_received_detail"]["items"]
+    assert items[0]["counterparty_name"] == "Sharif"
+    assert items[0]["payment_type"] == "Naqd"
+    assert items[1]["amount"] == 70_000
+
+
+@pytest.mark.asyncio
+async def test_save_daily_report_persists_tax_info_json():
+    fake_db = FakeDB(fetch_one_results=[None])
+    bot = make_bot(fake_db)
+    context = SimpleNamespace(
+        user_data={
+            "current_shift_id": 5,
+            "sales_amount": 100,
+            "debt_received": 0,
+            "expenses": 0,
+            "uzcard_amount": 0,
+            "humo_amount": 0,
+            "p2p_amount": 0,
+            "uzcard_refund": 0,
+            "humo_refund": 0,
+            "other_payments": 0,
+            "debt_payments": 0,
+            "debt_refunds": 0,
+            "tax_info_check_image": "file_tax",
+            "tax_info_cash_amount": 25_000,
+        }
+    )
+
+    await bot.save_daily_report(None, context)
+
+    _, params = fake_db.execute_calls[0]
+    payload = json.loads(params["report_data"])
+    assert payload["tax_info"]["check_image"] == "file_tax"
+    assert payload["tax_info"]["cash_amount"] == 25_000
 
 
 @pytest.mark.asyncio
@@ -554,7 +810,7 @@ async def test_report_debt_received_positive_amount_requests_payment_type():
     state = await bot.report_debt_received(update, context)
 
     assert state == REPORT_DEBT_RECEIVED
-    assert context.user_data["debt_received"] == 50000
+    assert context.user_data["debt_received_current_amount"] == 50000
     assert context.user_data["debt_received_detail_stage"] == "counterparty_name"
     assert "kimdan keldi" in message.replies[-1]["text"].lower()
 
@@ -579,7 +835,7 @@ async def test_report_sales_positive_amount_completes_without_payment_type():
 
 
 @pytest.mark.asyncio
-async def test_report_debt_received_collects_payment_type_and_returns_to_sverka():
+async def test_report_debt_received_collects_multiple_items_and_returns_to_sverka():
     bot = make_bot()
     bot._after_sverka_step = AsyncMock(return_value=SUBMIT_DAILY_REPORT)
     context = SimpleNamespace(
@@ -591,10 +847,30 @@ async def test_report_debt_received_collects_payment_type_and_returns_to_sverka(
     await bot.report_debt_received(make_text_update("+998901234567")[0], context)
     state = await bot.report_debt_received(make_text_update("P2P")[0], context)
 
+    assert state == REPORT_DEBT_RECEIVED
+    assert context.user_data["debt_received"] == 50000
+    assert context.user_data["debt_received_items"] == [
+        {
+            "counterparty_name": "Jamshid",
+            "counterparty_phone": "+998901234567",
+            "amount": 50000,
+            "payment_type": "P2P",
+        }
+    ]
+    assert context.user_data["debt_received_detail_stage"] == "loop"
+    bot._after_sverka_step.assert_not_awaited()
+
+    await bot.report_debt_received(make_text_update("➕ Yana qo'shish")[0], context)
+    await bot.report_debt_received(make_text_update("30000")[0], context)
+    await bot.report_debt_received(make_text_update("Sharif")[0], context)
+    await bot.report_debt_received(make_text_update("+998931434413")[0], context)
+    await bot.report_debt_received(make_text_update("Naqd")[0], context)
+    state = await bot.report_debt_received(make_text_update("✅ Yakunlash")[0], context)
+
     assert state == SUBMIT_DAILY_REPORT
-    assert context.user_data["debt_received_payment_type"] == "P2P"
-    assert context.user_data["debt_received_counterparty_name"] == "Jamshid"
-    assert context.user_data["debt_received_counterparty_phone"] == "+998901234567"
+    assert context.user_data["debt_received"] == 80000
+    assert context.user_data["debt_received_items"][1]["counterparty_name"] == "Sharif"
+    assert context.user_data["debt_received_items"][1]["payment_type"] == "Naqd"
     assert "debt_received_detail_stage" not in context.user_data
     bot._after_sverka_step.assert_awaited_once()
 
@@ -633,6 +909,45 @@ async def test_report_p2p_saves_amount_and_returns_to_sverka():
 
 
 @pytest.mark.asyncio
+async def test_report_tax_info_collects_image_then_cash_amount():
+    fake_db = FakeDB()
+    bot = make_bot(fake_db)
+    bot._after_sverka_step = AsyncMock(return_value=SUBMIT_DAILY_REPORT)
+    context = SimpleNamespace(
+        user_data={
+            "current_shift_id": 5,
+            "pending_sverka_key": "tax_info",
+            "pending_sverka_state": REPORT_TAX_INFO,
+            "tax_info_stage": "check_image",
+            "sverka_entrypoint": "closing",
+            "sverka_status": {"tax_info": False},
+        }
+    )
+    image_update, image_message = make_text_update("")
+    image_update.message.photo = [
+        SimpleNamespace(file_id="small_tax"),
+        SimpleNamespace(file_id="large_tax"),
+    ]
+
+    state = await bot.report_tax_info(image_update, context)
+
+    assert state == REPORT_TAX_INFO
+    assert context.user_data["tax_info_check_image"] == "large_tax"
+    assert context.user_data["tax_info_stage"] == "cash_amount"
+    assert "Naqd summani kiriting" in image_message.replies[-1]["text"]
+    assert fake_db.execute_calls[0][1] == (5, "large_tax", "tax_info_check")
+
+    state = await bot.report_tax_info(make_text_update("25000")[0], context)
+
+    assert state == SUBMIT_DAILY_REPORT
+    assert context.user_data["tax_info_cash_amount"] == 25000
+    assert "tax_info_stage" not in context.user_data
+    assert "pending_sverka_key" not in context.user_data
+    assert context.user_data["sverka_status"]["tax_info"] is True
+    bot._after_sverka_step.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_report_debt_payments_positive_amount_requests_counterparty_name():
     bot = make_bot()
     update, message = make_text_update("120000")
@@ -643,13 +958,13 @@ async def test_report_debt_payments_positive_amount_requests_counterparty_name()
     state = await bot.report_debt_payments(update, context)
 
     assert state == REPORT_DEBT_PAYMENTS
-    assert context.user_data["debt_payments"] == 120000
+    assert context.user_data["debt_payments_current_amount"] == 120000
     assert context.user_data["debt_payments_detail_stage"] == "counterparty_name"
-    assert "kimga berildi" in message.replies[-1]["text"].lower()
+    assert "qarzdor ismini" in message.replies[-1]["text"].lower()
 
 
 @pytest.mark.asyncio
-async def test_report_debt_payments_collects_phone_and_returns_to_sverka():
+async def test_report_debt_payments_collects_check_image_and_returns_to_sverka():
     bot = make_bot()
     bot._after_sverka_step = AsyncMock(return_value=SUBMIT_DAILY_REPORT)
     context = SimpleNamespace(
@@ -660,10 +975,33 @@ async def test_report_debt_payments_collects_phone_and_returns_to_sverka():
     await bot.report_debt_payments(make_text_update("Rustam")[0], context)
     state = await bot.report_debt_payments(make_text_update("+998901112233")[0], context)
 
-    assert state == SUBMIT_DAILY_REPORT
+    assert state == REPORT_DEBT_PAYMENTS
+    assert context.user_data["debt_payments_detail_stage"] == "confirm"
+
+    await bot.report_debt_payments(make_text_update("✅ Qarz berildi")[0], context)
+    photo_update, _ = make_text_update("")
+    photo_update.message.photo = [
+        SimpleNamespace(file_id="small_file"),
+        SimpleNamespace(file_id="large_file"),
+    ]
+    state = await bot.report_debt_payments(photo_update, context)
+
+    assert state == REPORT_DEBT_PAYMENTS
     assert context.user_data["debt_payments"] == 120000
-    assert context.user_data["debt_payments_counterparty_name"] == "Rustam"
-    assert context.user_data["debt_payments_counterparty_phone"] == "+998901112233"
+    assert context.user_data["debt_payments_items"] == [
+        {
+            "counterparty_name": "Rustam",
+            "counterparty_phone": "+998901112233",
+            "amount": 120000,
+            "check_image": "large_file",
+        }
+    ]
+    assert context.user_data["debt_payments_detail_stage"] == "loop"
+    bot._after_sverka_step.assert_not_awaited()
+
+    state = await bot.report_debt_payments(make_text_update("✅ Yakunlash")[0], context)
+
+    assert state == SUBMIT_DAILY_REPORT
     assert "debt_payments_detail_stage" not in context.user_data
     bot._after_sverka_step.assert_awaited_once()
 
@@ -723,10 +1061,19 @@ async def test_report_expenses_finishes_and_returns_to_sverka():
 
     await bot.report_expenses(make_text_update("Mirshod Dastafka -- 10 000")[0], context)
     await bot.report_expenses(make_text_update("Ulug Paynet -- 100 000")[0], context)
-    state = await bot.report_expenses(make_text_update("Yakunlash")[0], context)
+    finish_update, finish_message = make_text_update("Yakunlash")
+    state = await bot.report_expenses(finish_update, context)
+
+    assert state == REPORT_EXPENSES
+    assert context.user_data["expense_detail_stage"] == "cash_amount"
+    assert "Naqd summani kiriting" in finish_message.replies[-1]["text"]
+    bot._after_sverka_step.assert_not_awaited()
+
+    state = await bot.report_expenses(make_text_update("50000")[0], context)
 
     assert state == SUBMIT_DAILY_REPORT
     assert context.user_data["expenses"] == 110_000
+    assert context.user_data["expense_cash_amount"] == 50_000
     assert context.user_data["expense_items"] == [
         {"text": "Mirshod Dastafka -- 10 000", "amount": 10_000},
         {"text": "Ulug Paynet -- 100 000", "amount": 100_000},
@@ -772,6 +1119,203 @@ async def test_finalize_sverka_sends_group_summary():
     bot.save_daily_report.assert_awaited_once()
     bot._send_group_message.assert_awaited_once()
     bot.show_cashier_menu.assert_awaited_once_with(update, context)
+
+
+@pytest.mark.asyncio
+async def test_finalize_sverka_clears_values_before_next_same_shift_sverka():
+    bot = make_bot()
+    bot.save_daily_report = AsyncMock()
+    bot._get_shift_summary = AsyncMock(return_value={"location": "Sardoba", "report_data": {}})
+    bot._send_group_message = AsyncMock()
+    bot.show_cashier_menu = AsyncMock()
+    context = SimpleNamespace(
+        user_data={
+            "current_shift_id": 5,
+            "flow": "sverka",
+            "sverka_shift_id": 5,
+            "sverka_entrypoint": "standalone",
+            "sales_amount": 1000,
+            "debt_received": 0,
+            "expenses": 0,
+            "uzcard_amount": 0,
+            "humo_amount": 0,
+            "p2p_amount": 0,
+            "uzcard_refund": 0,
+            "humo_refund": 0,
+            "other_payments": 0,
+            "debt_payments": 0,
+            "debt_refunds": 0,
+            "sverka_status": {
+                "sales_amount": True,
+                "debt_received": True,
+                "expenses": True,
+                "uzcard_amount": True,
+                "humo_amount": True,
+                "p2p_amount": True,
+                "uzcard_refund": True,
+                "humo_refund": True,
+                "other_payments": True,
+                "debt_payments": True,
+                "debt_refunds": True,
+            },
+        },
+        bot=SimpleNamespace(send_message=AsyncMock()),
+    )
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=99), effective_message=FakeMessage())
+
+    await bot._finalize_sverka(update, context)
+
+    for key, *_ in bot._sverka_config():
+        assert key not in context.user_data
+
+    bot.show_sverka_menu = AsyncMock()
+    await bot._start_sverka_flow(update, context, 5, entrypoint="standalone")
+
+    assert all(done is False for done in context.user_data["sverka_status"].values())
+
+
+@pytest.mark.asyncio
+async def test_finalize_sverka_sends_debt_payment_check_image_to_group():
+    class FakeTelegramFile:
+        async def download_as_bytearray(self):
+            raw = BytesIO()
+            PILImage.new("RGB", (320, 180), (240, 240, 240)).save(raw, format="JPEG")
+            return bytearray(raw.getvalue())
+
+    bot = make_bot()
+    bot.save_daily_report = AsyncMock()
+    bot._get_group_chat_id = AsyncMock(return_value=-100123)
+    send_order = []
+    bot._get_shift_summary = AsyncMock(
+        return_value={
+            "first_name": "Ali",
+            "last_name": "Valiyev",
+            "location": "Sardoba",
+            "opened_at": "2026-05-22 10:00:00",
+            "sales_amount": 0,
+            "debt_received": 0,
+            "expenses": 0,
+            "uzcard_amount": 0,
+            "humo_amount": 0,
+            "p2p_amount": 0,
+            "uzcard_refund": 0,
+            "humo_refund": 0,
+            "other_payments": 0,
+            "debt_payments": 10_000,
+            "debt_refunds": 0,
+            "report_data": {
+                "debt_payments_detail": {
+                    "items": [
+                        {
+                            "counterparty_name": "Sharif",
+                            "counterparty_phone": "+998931434413",
+                            "amount": 10_000,
+                            "check_image": "file_check",
+                        }
+                    ]
+                }
+            },
+        }
+    )
+    async def fake_send_group_message(*args, **kwargs):
+        send_order.append("summary")
+        return True
+
+    async def fake_send_photo(*args, **kwargs):
+        send_order.append("photo")
+        return True
+
+    bot._send_group_message = AsyncMock(side_effect=fake_send_group_message)
+    bot.show_cashier_menu = AsyncMock()
+    context = SimpleNamespace(
+        user_data={"current_shift_id": 5, "flow": "sverka", "sverka_entrypoint": "standalone"},
+        bot=SimpleNamespace(
+            send_message=AsyncMock(),
+            get_file=AsyncMock(return_value=FakeTelegramFile()),
+            send_photo=AsyncMock(side_effect=fake_send_photo),
+        ),
+    )
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=99), effective_message=FakeMessage())
+
+    state = await bot._finalize_sverka(update, context)
+
+    assert state == MAIN_MENU
+    context.bot.get_file.assert_awaited_once_with("file_check")
+    context.bot.send_photo.assert_awaited_once()
+    kwargs = context.bot.send_photo.await_args.kwargs
+    assert kwargs["chat_id"] == -100123
+    assert "caption" not in kwargs
+    assert send_order == ["photo", "summary"]
+
+
+@pytest.mark.asyncio
+async def test_finalize_sverka_from_closing_sends_tax_image_before_group_summary():
+    class FakeTelegramFile:
+        async def download_as_bytearray(self):
+            raw = BytesIO()
+            PILImage.new("RGB", (320, 180), (240, 240, 240)).save(raw, format="JPEG")
+            return bytearray(raw.getvalue())
+
+    bot = make_bot()
+    bot.save_daily_report = AsyncMock()
+    bot._get_group_chat_id = AsyncMock(return_value=-100123)
+    send_order = []
+    bot._get_shift_summary = AsyncMock(
+        return_value={
+            "first_name": "Ali",
+            "last_name": "Valiyev",
+            "location": "Sardoba",
+            "opened_at": "2026-05-22 10:00:00",
+            "sales_amount": 0,
+            "debt_received": 0,
+            "expenses": 0,
+            "uzcard_amount": 0,
+            "humo_amount": 0,
+            "p2p_amount": 0,
+            "uzcard_refund": 0,
+            "humo_refund": 0,
+            "other_payments": 0,
+            "debt_payments": 0,
+            "debt_refunds": 0,
+            "report_data": {
+                "tax_info": {
+                    "check_image": "file_tax",
+                    "cash_amount": 25_000,
+                }
+            },
+        }
+    )
+
+    async def fake_send_group_message(*args, **kwargs):
+        send_order.append("summary")
+        return True
+
+    async def fake_send_photo(*args, **kwargs):
+        send_order.append("tax_photo")
+        return True
+
+    bot._send_group_message = AsyncMock(side_effect=fake_send_group_message)
+    bot._prompt_close_shift_amount = AsyncMock(return_value=CLOSE_SHIFT)
+    context = SimpleNamespace(
+        user_data={"current_shift_id": 5, "flow": "sverka", "sverka_entrypoint": "closing"},
+        bot=SimpleNamespace(
+            send_message=AsyncMock(),
+            get_file=AsyncMock(return_value=FakeTelegramFile()),
+            send_photo=AsyncMock(side_effect=fake_send_photo),
+        ),
+    )
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=99), effective_message=FakeMessage())
+
+    state = await bot._finalize_sverka(update, context)
+
+    assert state == CLOSE_SHIFT
+    context.bot.get_file.assert_awaited_once_with("file_tax")
+    context.bot.send_photo.assert_awaited_once()
+    assert context.bot.send_photo.await_args.kwargs["chat_id"] == -100123
+    assert "caption" not in context.bot.send_photo.await_args.kwargs
+    assert send_order == ["tax_photo", "summary"]
+    group_text = bot._send_group_message.await_args.args[1]
+    assert group_text.startswith("🔒 Kassa yopilishi ma'lumotlari")
 
 
 def test_build_sverka_summary_message_places_comment_under_other_payments():
@@ -834,7 +1378,11 @@ async def test_finalize_sverka_from_closing_continues_to_close_amount_step():
     assert state == CLOSE_SHIFT
     bot.save_daily_report.assert_awaited_once()
     bot._send_group_message.assert_awaited_once()
+    group_text = bot._send_group_message.await_args.args[1]
+    assert group_text.startswith("🔒 Kassa yopilishi ma'lumotlari")
     bot._prompt_close_shift_amount.assert_awaited_once()
+    prompt_text = bot._prompt_close_shift_amount.await_args.kwargs["text"]
+    assert "Kassa yopilishi ma'lumotlari" in prompt_text
     bot.show_cashier_menu.assert_not_awaited()
     assert "pending_sverka_key" not in context.user_data
     assert "expense_detail_stage" not in context.user_data
@@ -853,6 +1401,52 @@ async def test_show_sverka_menu_includes_cancel_button():
     labels = [button.text for row in markup.inline_keyboard for button in row]
     assert "🟢 Yakunlash" in labels
     assert "❌ Bekor qilish" in labels
+    assert kwargs["text"].endswith(chr(0x2800) * 36)
+
+
+@pytest.mark.asyncio
+async def test_show_sverka_menu_uses_full_width_step_buttons():
+    bot = make_bot()
+    context = SimpleNamespace(user_data={}, bot=SimpleNamespace(send_message=AsyncMock()))
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=99))
+
+    await bot.show_sverka_menu(update, context)
+
+    markup = context.bot.send_message.await_args.kwargs["reply_markup"]
+    rows = markup.inline_keyboard
+    step_rows = rows[: len(bot._sverka_config())]
+
+    assert all(len(row) == 1 for row in step_rows)
+    labels = [row[0].text for row in step_rows]
+    assert "☐ Qarzga berilgan to'lovlar" in labels
+
+
+@pytest.mark.asyncio
+async def test_show_sverka_menu_excludes_card_and_refund_fields_when_closing():
+    bot = make_bot()
+    context = SimpleNamespace(
+        user_data={"sverka_entrypoint": "closing"},
+        bot=SimpleNamespace(send_message=AsyncMock()),
+    )
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=99))
+
+    await bot.show_sverka_menu(update, context)
+
+    markup = context.bot.send_message.await_args.kwargs["reply_markup"]
+    labels = [button.text for row in markup.inline_keyboard for button in row]
+
+    assert "☐ Uzcard summasi" not in labels
+    assert "☐ Humo summasi" not in labels
+    assert "☐ P2P summasi" not in labels
+    assert "☐ Uzcard vozvrat" not in labels
+    assert "☐ Humo vozvrat" not in labels
+    assert "☐ Vozvrat qarzlar" not in labels
+    assert "uzcard_amount" not in context.user_data["sverka_status"]
+    assert "p2p_amount" not in context.user_data["sverka_status"]
+    assert "debt_refunds" not in context.user_data["sverka_status"]
+    assert "☐ Savdo summasi" in labels
+    assert "☐ Soliq ma'lumotlari" in labels
+    assert "tax_info" in context.user_data["sverka_status"]
 
 
 @pytest.mark.asyncio
@@ -871,6 +1465,56 @@ async def test_sverka_expenses_step_shows_entry_keyboard():
     assert isinstance(kwargs["reply_markup"], ReplyKeyboardMarkup)
     assert "Chiqim sababini kiriting." in kwargs["text"]
     assert "Yakunlashni bosing" in kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_sverka_debt_received_step_resets_previous_items_on_menu_entry():
+    bot = make_bot()
+    query = SimpleNamespace(data="sv:debt_received", message=SimpleNamespace(chat_id=99), answer=AsyncMock())
+    update = SimpleNamespace(callback_query=query)
+    context = SimpleNamespace(
+        user_data={
+            "sverka_status": {},
+            "debt_received_items": [{"counterparty_name": "Old", "amount": 1000}],
+            "debt_received_detail_stage": "loop",
+            "debt_received_current_amount": 1000,
+        },
+        bot=SimpleNamespace(send_message=AsyncMock()),
+    )
+
+    state = await bot.sverka_select_step(update, context)
+
+    assert state == REPORT_DEBT_RECEIVED
+    assert "debt_received_items" not in context.user_data
+    assert "debt_received_detail_stage" not in context.user_data
+    kwargs = context.bot.send_message.await_args.kwargs
+    assert "Kelgan qarzlarni kiriting" in kwargs["text"]
+    assert isinstance(kwargs["reply_markup"], ReplyKeyboardRemove)
+
+
+@pytest.mark.asyncio
+async def test_sverka_tax_info_step_starts_with_check_image_stage():
+    bot = make_bot()
+    query = SimpleNamespace(data="sv:tax_info", message=SimpleNamespace(chat_id=99), answer=AsyncMock())
+    update = SimpleNamespace(callback_query=query)
+    context = SimpleNamespace(
+        user_data={
+            "sverka_entrypoint": "closing",
+            "sverka_status": {},
+            "tax_info_stage": "cash_amount",
+            "tax_info_check_image": "old_file",
+        },
+        bot=SimpleNamespace(send_message=AsyncMock()),
+    )
+
+    state = await bot.sverka_select_step(update, context)
+
+    assert state == REPORT_TAX_INFO
+    assert context.user_data["pending_sverka_key"] == "tax_info"
+    assert context.user_data["tax_info_stage"] == "check_image"
+    assert "tax_info_check_image" not in context.user_data
+    kwargs = context.bot.send_message.await_args.kwargs
+    assert "Soliq cheki rasmini yuboring" in kwargs["text"]
 
 
 @pytest.mark.asyncio
@@ -966,21 +1610,22 @@ async def test_send_group_shift_photo_falls_back_to_document():
 
 @pytest.mark.asyncio
 async def test_flush_opening_group_photos_sends_media_album_with_all_items():
+    class FakeTelegramFile:
+        async def download_to_memory(self, buf):
+            PILImage.new("RGB", (320, 180), (240, 240, 240)).save(buf, format="JPEG")
+
     bot = make_bot(
         FakeDB(
             fetch_one_results=[
-                {
-                    "first_name": "Ali",
-                    "last_name": "Valiyev",
-                    "location": "Sardoba",
-                    "opened_at": "2026-04-14 10:00:00",
-                },
                 {"group_chat_id": -100123},
             ]
         )
     )
     context = SimpleNamespace(
-        bot=SimpleNamespace(send_media_group=AsyncMock()),
+        bot=SimpleNamespace(
+            get_file=AsyncMock(return_value=FakeTelegramFile()),
+            send_media_group=AsyncMock(),
+        ),
         user_data={
             "pending_opening_group_photos": [
                 {
@@ -1005,6 +1650,8 @@ async def test_flush_opening_group_photos_sends_media_album_with_all_items():
     kwargs = context.bot.send_media_group.await_args.kwargs
     assert kwargs["chat_id"] == -100123
     assert len(kwargs["media"]) == 2
+    assert context.bot.get_file.await_count == 2
+    assert all(item.media not in {"file_1", "file_2"} for item in kwargs["media"])
     assert "pending_opening_group_photos" not in context.user_data
 
 
@@ -1534,7 +2181,7 @@ async def test_upload_payment_image_moves_to_close_amount_when_pair_complete_for
 
 
 @pytest.mark.asyncio
-async def test_start_shift_closing_redirects_to_payment_upload_when_images_missing():
+async def test_start_shift_closing_starts_final_sverka_without_payment_images():
     fake_db = FakeDB(
         fetch_one_results=[
             {"id": 10},  # user
@@ -1544,18 +2191,26 @@ async def test_start_shift_closing_redirects_to_payment_upload_when_images_missi
     bot = make_bot(fake_db)
     bot._ensure_cashier_authenticated = AsyncMock(return_value=True)
     bot._ensure_opening_requirements_completed = AsyncMock(return_value=True)
-    bot._count_shift_images = AsyncMock(side_effect=[0, 1])
+    bot._count_shift_images = AsyncMock()
+    bot._start_sverka_flow = AsyncMock(return_value=SUBMIT_DAILY_REPORT)
     bot.start_payment_image_upload = AsyncMock(return_value=UPLOAD_PAYMENT_IMAGE)
     update, message = make_text_update("Smena yopish", user_id=42)
     context = SimpleNamespace(user_data={})
 
     state = await bot.start_shift_closing(update, context)
 
-    assert state == UPLOAD_PAYMENT_IMAGE
-    assert context.user_data["awaiting_payment_images_for_close"] is True
+    assert state == SUBMIT_DAILY_REPORT
     assert context.user_data["current_shift_id"] == 5
-    assert "majburiy" in message.replies[-1]["text"]
-    bot.start_payment_image_upload.assert_awaited_once_with(update, context)
+    bot._count_shift_images.assert_not_awaited()
+    bot.start_payment_image_upload.assert_not_awaited()
+    bot._start_sverka_flow.assert_awaited_once_with(
+        update,
+        context,
+        5,
+        entrypoint="closing",
+        force_reset=True,
+        note="Smenani yopishdan oldin yakuniy sverkani to'ldiring.",
+    )
 
 
 @pytest.mark.asyncio
@@ -1671,8 +2326,7 @@ async def test_close_shift_warns_user_when_group_message_fails():
 async def test_finalize_shift_opening_flow_flushes_pending_photos_when_group_send_succeeds():
     bot = make_bot()
     bot._get_location_name = AsyncMock(return_value="Sardoba")
-    bot._send_group_message = AsyncMock(return_value=True)
-    bot._flush_opening_group_photos = AsyncMock()
+    bot._schedule_opening_group_notifications = Mock()
     context = SimpleNamespace(
         user_data={
             "current_shift_id": 5,
@@ -1691,11 +2345,14 @@ async def test_finalize_shift_opening_flow_flushes_pending_photos_when_group_sen
         cashier_last_name="Valiyev",
     )
 
-    bot._send_group_message.assert_awaited_once()
-    group_text = bot._send_group_message.await_args.args[1]
+    bot._schedule_opening_group_notifications.assert_called_once()
+    scheduled_args = bot._schedule_opening_group_notifications.call_args.args
+    assert scheduled_args[0] is context
+    assert scheduled_args[1] == [{"file_id": "file_1", "image_title": "Ish joyi holati rasmi"}]
+    group_text = scheduled_args[2]
     assert "Smena ochildi: Ali Valiyev" in group_text
     assert "Ochish summasi: 120 000" in group_text
-    bot._flush_opening_group_photos.assert_awaited_once_with(context, 5)
+    assert scheduled_args[3] == 99
 
     sent_texts = [call.kwargs["text"] for call in context.bot.send_message.await_args_list]
     assert any("Smena muvaffaqiyatli ochildi" in text for text in sent_texts)
@@ -1705,38 +2362,29 @@ async def test_finalize_shift_opening_flow_flushes_pending_photos_when_group_sen
 @pytest.mark.asyncio
 async def test_finalize_shift_opening_flow_warns_when_group_send_fails():
     bot = make_bot()
-    bot._get_location_name = AsyncMock(return_value="Sardoba")
+    bot._send_opening_group_photo_album = AsyncMock(return_value=True)
     bot._send_group_message = AsyncMock(return_value=False)
-    bot._flush_opening_group_photos = AsyncMock()
     context = SimpleNamespace(
-        user_data={
-            "current_shift_id": 5,
-            "location_id": 1,
-            "opening_amount": 120000,
-            "opening_amount_time": "2026-04-14 14:44:00",
-            "pending_opening_group_photos": [{"file_id": "file_1", "image_title": "Ish joyi holati rasmi"}],
-        },
+        user_data={},
         bot=SimpleNamespace(send_message=AsyncMock()),
     )
 
-    await bot._finalize_shift_opening_flow(
+    await bot._send_opening_group_notifications(
         context,
-        chat_id=99,
-        cashier_first_name="Ali",
-        cashier_last_name="Valiyev",
+        [{"file_id": "file_1", "image_title": "Ish joyi holati rasmi"}],
+        "Smena ochildi: Ali Valiyev",
+        99,
     )
 
-    bot._flush_opening_group_photos.assert_not_awaited()
+    bot._send_opening_group_photo_album.assert_awaited_once()
+    bot._send_group_message.assert_awaited_once_with(context, "Smena ochildi: Ali Valiyev")
     sent_texts = [call.kwargs["text"] for call in context.bot.send_message.await_args_list]
     assert any("guruhga yuborilmadi" in text for text in sent_texts)
 
 
 @pytest.mark.asyncio
-async def test_flush_opening_group_photos_falls_back_to_individual_uploads():
+async def test_flush_opening_group_photos_clears_queue_without_bot_client():
     bot = make_bot()
-    bot._get_shift_meta = AsyncMock(return_value={"cashier": "Ali Valiyev", "location": "Sardoba"})
-    bot._send_group_media_album = AsyncMock(return_value=False)
-    bot._send_group_shift_photo = AsyncMock(return_value=True)
     context = SimpleNamespace(
         user_data={
             "pending_opening_group_photos": [
@@ -1748,20 +2396,5 @@ async def test_flush_opening_group_photos_falls_back_to_individual_uploads():
 
     await bot._flush_opening_group_photos(context, 5)
 
-    bot._send_group_media_album.assert_awaited_once()
-    assert bot._send_group_shift_photo.await_count == 2
-    bot._send_group_shift_photo.assert_any_await(
-        context,
-        5,
-        "file_1",
-        "Ish joyi holati rasmi",
-        event_time="2026-04-14 10:01:00",
-    )
-    bot._send_group_shift_photo.assert_any_await(
-        context,
-        5,
-        "file_2",
-        "Ish joyi holati rasmi",
-        event_time="2026-04-14 10:01:05",
-    )
+    assert "pending_opening_group_photos" not in context.user_data
     assert "pending_opening_group_photos" not in context.user_data

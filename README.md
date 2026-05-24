@@ -31,8 +31,8 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
 `pgAdmin` kerak bo'lsa:
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.local.yml --profile tools up -d
-```
-
+````
+`
 This is a comprehensive Telegram bot for managing restaurant operations with two user roles: Admin and Cashier.
 
 ## Features

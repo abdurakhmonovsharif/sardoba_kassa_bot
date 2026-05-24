@@ -15,7 +15,8 @@ def _flatten(rows):
     CLOSE_SHIFT_NOTE,
     EDIT_REPORT_SELECT, EDIT_REPORT_VALUE,
     ADMIN_REGISTER_PHONE, ADMIN_REGISTER_PASSWORD, ADMIN_VERIFY_PASSWORD,
-) = range(38)
+    REPORT_TAX_INFO,
+) = range(39)
 
 ADMIN_MENU_ROWS = (
     ("Hisobotlar", "Barcha kassirlar"),
