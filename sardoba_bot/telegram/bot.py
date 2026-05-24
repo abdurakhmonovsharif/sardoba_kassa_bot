@@ -936,9 +936,20 @@ class SardobaBot:
         left_x = border + padding
         text_x = canvas_w - border - padding - right_w
         text_y = border + padding
+        if not title:
+            draw.rectangle(
+                [
+                    border + padding // 2,
+                    border + padding // 2,
+                    canvas_w - border - padding // 2,
+                    border + header_h - padding // 2,
+                ],
+                fill=(20, 20, 20),
+            )
+        title_fill = (255, 255, 255) if not title else (15, 23, 42)
         line_y = text_y
         for idx, line in enumerate(left_lines):
-            draw.text((left_x, line_y), line, fill=(15, 23, 42), font=font)
+            draw.text((left_x, line_y), line, fill=title_fill, font=font)
             line_y += line_heights[idx] + line_gap
         if title:
             draw.text((text_x, text_y), title, fill=(15, 23, 42), font=font)
