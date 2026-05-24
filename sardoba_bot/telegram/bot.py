@@ -876,8 +876,53 @@ class SardobaBot:
 
         border = 20
         padding = 28
-        header_h = max(150, min(220, source.width // 6))
         canvas_w = source.width + (border + padding) * 2
+        available_w = canvas_w - (border + padding) * 2
+        title = str(right_title or "").strip()
+        font_size = max(45, min(80, canvas_w // 15))
+
+        measure_draw = ImageDraw.Draw(PILImage.new("RGB", (1, 1)))
+
+        def text_size(text: str, font_obj) -> tuple[int, int]:
+            bbox = measure_draw.textbbox((0, 0), text, font=font_obj)
+            return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+        def wrap_text(text: str, font_obj, max_width: int) -> list[str]:
+            words = [word for word in str(text or "").split() if word]
+            if not words:
+                return [""]
+            lines = []
+            current = words[0]
+            for word in words[1:]:
+                candidate = f"{current} {word}"
+                if text_size(candidate, font_obj)[0] <= max_width:
+                    current = candidate
+                else:
+                    lines.append(current)
+                    current = word
+            lines.append(current)
+            return lines
+
+        if title:
+            min_font_size = 34
+            while font_size > min_font_size:
+                font = self._font(font_size, bold=True)
+                left_w, _ = text_size(left_title, font)
+                right_w, _ = text_size(title, font)
+                if left_w + right_w + padding <= available_w:
+                    break
+                font_size -= 2
+            left_lines = [left_title]
+        else:
+            font = self._font(font_size, bold=True)
+            left_lines = wrap_text(left_title, font, available_w)
+
+        line_gap = max(8, font_size // 6)
+        line_heights = [text_size(line, font)[1] for line in left_lines]
+        left_text_h = sum(line_heights) + line_gap * max(0, len(left_lines) - 1)
+        right_w, right_h = text_size(title, font) if title else (0, 0)
+        text_h = max(left_text_h, right_h)
+        header_h = text_h + padding * 2
         canvas_h = source.height + header_h + padding + border * 2
 
         canvas = PILImage.new("RGB", (canvas_w, canvas_h), "white")
@@ -888,27 +933,13 @@ class SardobaBot:
             width=border,
         )
 
-        title = str(right_title or "").strip()
-        font_size = max(45, min(80, canvas_w // 15))
-        min_font_size = 28
-        while font_size > min_font_size:
-            font = self._font(font_size, bold=True)
-            left_bbox = draw.textbbox((0, 0), left_title, font=font)
-            bbox = draw.textbbox((0, 0), title, font=font) if title else (0, 0, 0, 0)
-            available_w = canvas_w - (border + padding) * 2
-            gap = padding if title else 0
-            if (left_bbox[2] - left_bbox[0]) + (bbox[2] - bbox[0]) + gap <= available_w:
-                break
-            font_size -= 2
-
-        left_bbox = draw.textbbox((0, 0), left_title, font=font)
-        text_bbox = draw.textbbox((0, 0), title, font=font) if title else (0, 0, 0, 0)
-        text_w = text_bbox[2] - text_bbox[0]
         left_x = border + padding
-        text_x = canvas_w - border - padding - text_w
-        text_h = max(left_bbox[3] - left_bbox[1], text_bbox[3] - text_bbox[1])
-        text_y = border + max(12, (header_h - text_h) // 2)
-        draw.text((left_x, text_y), left_title, fill=(15, 23, 42), font=font)
+        text_x = canvas_w - border - padding - right_w
+        text_y = border + padding
+        line_y = text_y
+        for idx, line in enumerate(left_lines):
+            draw.text((left_x, line_y), line, fill=(15, 23, 42), font=font)
+            line_y += line_heights[idx] + line_gap
         if title:
             draw.text((text_x, text_y), title, fill=(15, 23, 42), font=font)
 
