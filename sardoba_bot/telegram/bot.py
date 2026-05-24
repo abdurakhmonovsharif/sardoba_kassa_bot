@@ -879,7 +879,7 @@ class SardobaBot:
         canvas_w = source.width + (border + padding) * 2
         available_w = canvas_w - (border + padding) * 2
         title = str(right_title or "").strip()
-        font_size = max(45, min(80, canvas_w // 15))
+        font_size = 200
 
         measure_draw = ImageDraw.Draw(PILImage.new("RGB", (1, 1)))
 
@@ -904,7 +904,7 @@ class SardobaBot:
             return lines
 
         if title:
-            min_font_size = 34
+            min_font_size = 72
             while font_size > min_font_size:
                 font = self._font(font_size, bold=True)
                 left_w, _ = text_size(left_title, font)
