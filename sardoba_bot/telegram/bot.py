@@ -879,7 +879,7 @@ class SardobaBot:
         canvas_w = source.width + (border + padding) * 2
         available_w = canvas_w - (border + padding) * 2
         title = str(right_title or "").strip()
-        font_size = 200
+        font_size = 400
 
         measure_draw = ImageDraw.Draw(PILImage.new("RGB", (1, 1)))
 
