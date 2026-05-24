@@ -856,7 +856,14 @@ class SardobaBot:
                 continue
         return ImageFont.load_default()
 
-    def _decorate_labeled_check_image(self, image_bytes, left_title: str, right_title: str) -> BytesIO:
+    def _decorate_labeled_check_image(
+        self,
+        image_bytes,
+        left_title: str,
+        right_title: str,
+        *,
+        large_title: bool = False,
+    ) -> BytesIO:
         from PIL import ImageDraw, ImageOps
 
         source = PILImage.open(BytesIO(image_bytes))
@@ -869,7 +876,7 @@ class SardobaBot:
 
         border = 20
         padding = 28
-        header_h = max(130, min(190, source.width // 7))
+        header_h = max(150, min(220, source.width // 6))
         canvas_w = source.width + (border + padding) * 2
         canvas_h = source.height + header_h + padding + border * 2
 
@@ -882,8 +889,9 @@ class SardobaBot:
         )
 
         title = str(right_title or "").strip()
-        font_size = max(38, min(68, canvas_w // 18))
-        while font_size > 24:
+        font_size = max(45, min(80, canvas_w // 15))
+        min_font_size = 28
+        while font_size > min_font_size:
             font = self._font(font_size, bold=True)
             left_bbox = draw.textbbox((0, 0), left_title, font=font)
             bbox = draw.textbbox((0, 0), title, font=font) if title else (0, 0, 0, 0)
