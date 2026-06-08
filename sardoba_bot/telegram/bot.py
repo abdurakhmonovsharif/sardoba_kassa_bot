@@ -1705,6 +1705,17 @@ class SardobaBot:
             await self.show_cashier_menu(update, context)
         return ConversationHandler.END
 
+    async def restart_session(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Reset the user's bot session and run the normal /start flow."""
+        self._cancel_receipt_roll_finalize_task(context)
+        context.user_data.clear()
+
+        message = getattr(update, "effective_message", None) or getattr(update, "message", None)
+        if message:
+            await message.reply_text("Bot qayta ishga tushirildi.")
+
+        return await self.start(update, context)
+
     async def register_firstname(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Get user's first name"""
         context.user_data['first_name'] = update.message.text
@@ -2011,8 +2022,12 @@ class SardobaBot:
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle general messages based on user state"""
-        text = update.message.text
+        text = (update.message.text or "").strip()
         user_id = update.effective_user.id
+
+        if text == "Restart":
+            await self.restart_session(update, context)
+            return
 
         # If cashier is mid-flow, let ConversationHandler handle and avoid menu spam
         if context.user_data.get('flow') in ['opening', 'sverka', 'closing', 'edit', 'payment_image']:
@@ -2277,8 +2292,12 @@ class SardobaBot:
 
     async def handle_cashier_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE, user):
         """Handle cashier commands"""
-        text = update.message.text
+        text = (update.message.text or "").strip()
         lang = 'uz'
+
+        if text == "Restart":
+            await self.restart_session(update, context)
+            return
 
         # Let ConversationHandler handle these menu actions
 
@@ -5949,23 +5968,24 @@ def main():
         .post_shutdown(_post_shutdown)
         .build()
     )
+    restart_text_filter = filters.TEXT & filters.Regex(r"^\s*Restart\s*$")
 
     # Create conversation handler for registration flow
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", bot.start), CallbackQueryHandler(bot.select_role, pattern='^role_')],
         states={
             SELECT_ROLE: [CallbackQueryHandler(bot.select_role)],
-            REGISTER_FIRSTNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.register_firstname)],
-            REGISTER_LASTNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.register_lastname)],
-            REGISTER_PHONE: [MessageHandler(filters.CONTACT | (filters.TEXT & ~filters.COMMAND), bot.register_phone)],
-            REGISTER_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.register_password)],
-            VERIFY_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.verify_password)],
-            ADMIN_LOGIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.admin_login)],
-            ADMIN_REGISTER_PHONE: [MessageHandler(filters.CONTACT | (filters.TEXT & ~filters.COMMAND), bot.admin_register_phone)],
-            ADMIN_REGISTER_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.admin_register_password)],
-            ADMIN_VERIFY_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.admin_verify_password)],
+            REGISTER_FIRSTNAME: [MessageHandler(restart_text_filter, bot.restart_session), MessageHandler(filters.TEXT & ~filters.COMMAND, bot.register_firstname)],
+            REGISTER_LASTNAME: [MessageHandler(restart_text_filter, bot.restart_session), MessageHandler(filters.TEXT & ~filters.COMMAND, bot.register_lastname)],
+            REGISTER_PHONE: [MessageHandler(restart_text_filter, bot.restart_session), MessageHandler(filters.CONTACT | (filters.TEXT & ~filters.COMMAND), bot.register_phone)],
+            REGISTER_PASSWORD: [MessageHandler(restart_text_filter, bot.restart_session), MessageHandler(filters.TEXT & ~filters.COMMAND, bot.register_password)],
+            VERIFY_PASSWORD: [MessageHandler(restart_text_filter, bot.restart_session), MessageHandler(filters.TEXT & ~filters.COMMAND, bot.verify_password)],
+            ADMIN_LOGIN: [MessageHandler(restart_text_filter, bot.restart_session), MessageHandler(filters.TEXT & ~filters.COMMAND, bot.admin_login)],
+            ADMIN_REGISTER_PHONE: [MessageHandler(restart_text_filter, bot.restart_session), MessageHandler(filters.CONTACT | (filters.TEXT & ~filters.COMMAND), bot.admin_register_phone)],
+            ADMIN_REGISTER_PASSWORD: [MessageHandler(restart_text_filter, bot.restart_session), MessageHandler(filters.TEXT & ~filters.COMMAND, bot.admin_register_password)],
+            ADMIN_VERIFY_PASSWORD: [MessageHandler(restart_text_filter, bot.restart_session), MessageHandler(filters.TEXT & ~filters.COMMAND, bot.admin_verify_password)],
         },
-        fallbacks=[CommandHandler("cancel", bot.cancel)],
+        fallbacks=[CommandHandler("cancel", bot.cancel), MessageHandler(restart_text_filter, bot.restart_session)],
     )
 
     # Add handlers
@@ -5981,33 +6001,40 @@ def main():
             CallbackQueryHandler(bot.select_location, pattern='^loc_'),
         ],
         states={
-            OPEN_SHIFT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.open_shift_amount)],
+            OPEN_SHIFT_AMOUNT: [MessageHandler(restart_text_filter, bot.restart_session), MessageHandler(filters.TEXT & ~filters.COMMAND, bot.open_shift_amount)],
             SELECT_LOCATION: [
                 CallbackQueryHandler(bot.select_location, pattern='^loc_'),
+                MessageHandler(restart_text_filter, bot.restart_session),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, bot.ask_select_location_again),
             ],
             SELECT_PAYMENT_IMAGE: [CallbackQueryHandler(bot.select_payment_image_type, pattern='^payimg:')],
             UPLOAD_PAYMENT_IMAGE: [
+                MessageHandler(restart_text_filter, bot.restart_session),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message),
                 MessageHandler(filters.PHOTO | filters.Document.ALL, bot.upload_payment_image),
             ],
             UPLOAD_WORKPLACE_STATUS: [
+                MessageHandler(restart_text_filter, bot.restart_session),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message),
                 MessageHandler(filters.PHOTO | filters.Document.ALL, bot.upload_workplace_status),
             ],
             UPLOAD_TERMINAL_POWER: [
+                MessageHandler(restart_text_filter, bot.restart_session),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message),
                 MessageHandler(filters.PHOTO | filters.Document.ALL, bot.upload_terminal_power),
             ],
             UPLOAD_ZERO_REPORT: [
+                MessageHandler(restart_text_filter, bot.restart_session),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message),
                 MessageHandler(filters.PHOTO | filters.Document.ALL, bot.upload_zero_report),
             ],
             UPLOAD_OPENING_NOTIFICATION: [
+                MessageHandler(restart_text_filter, bot.restart_session),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message),
                 MessageHandler(filters.PHOTO | filters.Document.ALL, bot.upload_opening_notification),
             ],
             UPLOAD_RECEIPT_ROLL: [
+                MessageHandler(restart_text_filter, bot.restart_session),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message),
                 MessageHandler(filters.PHOTO | filters.Document.ALL, bot.upload_receipt_roll),
             ],
@@ -6015,30 +6042,32 @@ def main():
                 CallbackQueryHandler(bot.sverka_select_step, pattern='^sv:'),
                 CallbackQueryHandler(bot.opening_select_step, pattern='^op:'),
             ],
-            REPORT_SALES: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_sales)],
-            REPORT_DEBT_RECEIVED: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_debt_received)],
-            REPORT_EXPENSES: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_expenses)],
-            REPORT_UZCARD: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_uzcard)],
-            REPORT_HUMO: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_humo)],
-            REPORT_P2P: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_p2p)],
-            REPORT_UZCARD_REFUND: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_uzcard_refund)],
-            REPORT_HUMO_REFUND: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_humo_refund)],
-            REPORT_OTHER_PAYMENTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_other_payments)],
+            REPORT_SALES: [MessageHandler(restart_text_filter, bot.restart_session), MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_sales)],
+            REPORT_DEBT_RECEIVED: [MessageHandler(restart_text_filter, bot.restart_session), MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_debt_received)],
+            REPORT_EXPENSES: [MessageHandler(restart_text_filter, bot.restart_session), MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_expenses)],
+            REPORT_UZCARD: [MessageHandler(restart_text_filter, bot.restart_session), MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_uzcard)],
+            REPORT_HUMO: [MessageHandler(restart_text_filter, bot.restart_session), MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_humo)],
+            REPORT_P2P: [MessageHandler(restart_text_filter, bot.restart_session), MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_p2p)],
+            REPORT_UZCARD_REFUND: [MessageHandler(restart_text_filter, bot.restart_session), MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_uzcard_refund)],
+            REPORT_HUMO_REFUND: [MessageHandler(restart_text_filter, bot.restart_session), MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_humo_refund)],
+            REPORT_OTHER_PAYMENTS: [MessageHandler(restart_text_filter, bot.restart_session), MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_other_payments)],
             REPORT_DEBT_PAYMENTS: [
+                MessageHandler(restart_text_filter, bot.restart_session),
                 MessageHandler(filters.PHOTO | filters.Document.ALL, bot.report_debt_payments),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_debt_payments),
             ],
-            REPORT_DEBT_REFUNDS: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_debt_refunds)],
+            REPORT_DEBT_REFUNDS: [MessageHandler(restart_text_filter, bot.restart_session), MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_debt_refunds)],
             REPORT_TAX_INFO: [
+                MessageHandler(restart_text_filter, bot.restart_session),
                 MessageHandler(filters.PHOTO | filters.Document.ALL, bot.report_tax_info),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, bot.report_tax_info),
             ],
             EDIT_REPORT_SELECT: [CallbackQueryHandler(bot.edit_reports_select, pattern='^edit:')],
-            EDIT_REPORT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.edit_reports_value)],
-            CLOSE_SHIFT: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.close_shift)],
-            CLOSE_SHIFT_NOTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot.close_shift_note)],
+            EDIT_REPORT_VALUE: [MessageHandler(restart_text_filter, bot.restart_session), MessageHandler(filters.TEXT & ~filters.COMMAND, bot.edit_reports_value)],
+            CLOSE_SHIFT: [MessageHandler(restart_text_filter, bot.restart_session), MessageHandler(filters.TEXT & ~filters.COMMAND, bot.close_shift)],
+            CLOSE_SHIFT_NOTE: [MessageHandler(restart_text_filter, bot.restart_session), MessageHandler(filters.TEXT & ~filters.COMMAND, bot.close_shift_note)],
         },
-        fallbacks=[CommandHandler("cancel", bot.cancel)],
+        fallbacks=[CommandHandler("cancel", bot.cancel), MessageHandler(restart_text_filter, bot.restart_session)],
     )
     application.add_handler(cashier_conv)
     # Ensure sverka inline buttons always work even if conversation state was lost

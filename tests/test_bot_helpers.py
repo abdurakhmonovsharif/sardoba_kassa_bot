@@ -2185,6 +2185,7 @@ async def test_handle_message_closing_flow_routes_to_amount_step_when_amount_mis
         ("Kassir so'rovlari", "handle_approval_requests"),
         ("Ma'lumotlarni o'zgartirish", "modify_user_data"),
         ("Excel/PDF yuklab olish", "export_data"),
+        ("Restart", "restart_session"),
     ],
 )
 async def test_admin_buttons_dispatch_to_expected_handlers(text, method_name):
@@ -2200,6 +2201,7 @@ async def test_admin_buttons_dispatch_to_expected_handlers(text, method_name):
         "handle_approval_requests",
         "modify_user_data",
         "export_data",
+        "restart_session",
     ):
         setattr(bot, name, AsyncMock())
 
@@ -2234,6 +2236,7 @@ async def test_admin_report_period_buttons_dispatch_to_location_prompt(text, per
         ("Sverka", "start_daily_reporting"),
         ("Rasm jo'natish", "start_payment_image_upload"),
         ("Hisobotlarni tahrirlash", "edit_reports"),
+        ("Restart", "restart_session"),
     ],
 )
 async def test_cashier_buttons_dispatch_to_expected_handlers(text, method_name):
@@ -2248,6 +2251,7 @@ async def test_cashier_buttons_dispatch_to_expected_handlers(text, method_name):
         "start_daily_reporting",
         "start_payment_image_upload",
         "edit_reports",
+        "restart_session",
     ):
         setattr(bot, name, AsyncMock())
 
@@ -2296,6 +2300,29 @@ async def test_cashier_password_success_with_expired_action_returns_to_menu():
     bot.start_shift_opening.assert_not_awaited()
     bot.show_cashier_menu.assert_awaited_once_with(update, context)
     assert "sessiya muddati tugagan" in message.replies[-1]["text"].lower()
+
+
+@pytest.mark.asyncio
+async def test_restart_button_clears_active_cashier_flow_and_requires_password():
+    bot = make_bot(
+        FakeDB(fetch_one_results=[{"role": "cashier", "first_name": "Ali", "password_hash": hash_password("0000")}])
+    )
+    update, message = make_text_update("Restart")
+    context = SimpleNamespace(
+        user_data={
+            "flow": "opening",
+            "cashier_authenticated": True,
+            "pending_sverka_key": "sales_amount",
+        }
+    )
+
+    await bot.handle_message(update, context)
+
+    assert context.user_data["flow"] is None
+    assert context.user_data["cashier_pending_password"] is True
+    assert "cashier_authenticated" not in context.user_data
+    assert message.replies[0]["text"] == "Bot qayta ishga tushirildi."
+    assert message.replies[-1]["text"] == "Parolni kiriting:"
 
 
 @pytest.mark.asyncio

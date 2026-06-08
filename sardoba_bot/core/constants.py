@@ -22,6 +22,7 @@ ADMIN_MENU_ROWS = (
     ("Hisobotlar", "Barcha kassirlar"),
     ("Kassir so'rovlari", "Ma'lumotlarni o'zgartirish"),
     ("Excel/PDF yuklab olish",),
+    ("Restart",),
 )
 
 ADMIN_REPORTS_MENU_ROWS = (
@@ -34,6 +35,7 @@ CASHIER_MENU_ROWS = (
     ("Smena ochish", "Smena yopish"),
     ("Sverka", "Rasm jo'natish"),
     ("Hisobotlarni tahrirlash",),
+    ("Restart",),
 )
 
 EXPORT_MENU_ROWS = (
@@ -61,6 +63,7 @@ ADMIN_DIRECT_ACTIONS = {
     "Kassir so'rovlari": "handle_approval_requests",
     "Ma'lumotlarni o'zgartirish": "modify_user_data",
     "Excel/PDF yuklab olish": "export_data",
+    "Restart": "restart_session",
 }
 
 CASHIER_DIRECT_ACTIONS = {
@@ -69,4 +72,5 @@ CASHIER_DIRECT_ACTIONS = {
     "Sverka": "start_daily_reporting",
     "Rasm jo'natish": "start_payment_image_upload",
     "Hisobotlarni tahrirlash": "edit_reports",
+    "Restart": "restart_session",
 }
