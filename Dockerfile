@@ -6,8 +6,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# System deps for reportlab (PDF) and general runtime
+# System deps for reportlab (PDF), Pillow image labels, and general runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    fonts-dejavu-core \
     libfreetype6 \
     libjpeg62-turbo \
     libpng16-16 \

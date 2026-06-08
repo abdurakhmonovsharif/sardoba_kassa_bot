@@ -951,6 +951,8 @@ class SardobaBot:
         paths = [
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
             "/System/Library/Fonts/Supplemental/Arial Bold.ttf" if bold else "/System/Library/Fonts/Supplemental/Arial.ttf",
             "/Library/Fonts/Arial Bold.ttf" if bold else "/Library/Fonts/Arial.ttf",
         ]
@@ -959,6 +961,12 @@ class SardobaBot:
                 return ImageFont.truetype(path, size)
             except Exception:
                 continue
+        if not getattr(self, "_font_fallback_warned", False):
+            self._font_fallback_warned = True
+            logger.warning(
+                "No TrueType font found for image labels; falling back to Pillow default font. "
+                "Install fonts-dejavu-core in production to keep Telegram image titles readable."
+            )
         return ImageFont.load_default()
 
     def _decorate_labeled_check_image(
