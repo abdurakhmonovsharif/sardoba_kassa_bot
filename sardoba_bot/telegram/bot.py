@@ -760,6 +760,8 @@ class SardobaBot:
         context.user_data["sverka_shift_id"] = shift_id
         context.user_data["sverka_entrypoint"] = entrypoint
         context.user_data.pop("pending_close_amount", None)
+        context.user_data.pop("sverka_finalizing", None)
+        context.user_data.pop("sverka_finalized_entrypoint", None)
         context.user_data["sverka_status"] = {key: False for key, *_ in self._active_sverka_config(context)}
         context.user_data.pop("pending_sverka_key", None)
         context.user_data.pop("pending_sverka_state", None)
@@ -3546,13 +3548,38 @@ class SardobaBot:
         # Shu sababli bu yerda alohida sverka fayl yubormaymiz.
 
     async def _finalize_sverka(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await self.save_daily_report(update, context)
+        entrypoint = context.user_data.get("sverka_entrypoint")
+        if context.user_data.get("sverka_finalizing"):
+            await context.bot.send_message(
+                chat_id=self._effective_chat_id(update),
+                text="Kassa yopilishi ma'lumotlari yuborilmoqda. Iltimos, kuting.",
+            )
+            return SUBMIT_DAILY_REPORT
+        if context.user_data.get("sverka_finalized_entrypoint") == "closing":
+            if context.user_data.get("pending_close_amount") is not None:
+                await context.bot.send_message(
+                    chat_id=self._effective_chat_id(update),
+                    text="Smena yopish summasi qabul qilingan. Endi izoh kiriting:",
+                )
+                return CLOSE_SHIFT_NOTE
+            return await self._prompt_close_shift_amount(
+                update,
+                context,
+                text="Kassa yopilishi ma'lumotlari oldin yuborilgan. Endi smenani yopish uchun yakuniy summani kiriting:",
+            )
+
+        context.user_data["sverka_finalizing"] = True
+        try:
+            await self.save_daily_report(update, context)
+        except Exception:
+            context.user_data.pop("sverka_finalizing", None)
+            raise
 
         shift_id = context.user_data.get("current_shift_id")
+        group_send_done = False
         if shift_id:
             try:
                 shift_summary = await self._get_shift_summary(shift_id) or {}
-                entrypoint = context.user_data.get("sverka_entrypoint")
                 if entrypoint == "closing":
                     await self._send_closing_group_photo_album(context, int(shift_id), shift_summary)
                     summary_text = self._build_sverka_summary_message(
@@ -3564,14 +3591,17 @@ class SardobaBot:
                     await self._send_debt_payment_check_images(context, shift_summary)
                     summary_text = self._build_sverka_cash_result_message(shift_summary)
                 await self._send_group_message(context, summary_text)
+                group_send_done = True
             except Exception:
                 logger.exception("sverka group send failed")
 
-        entrypoint = context.user_data.get("sverka_entrypoint")
         self._clear_sverka_value_state(context)
         self._clear_sverka_flow_state(context)
+        context.user_data.pop("sverka_finalizing", None)
 
         if entrypoint == "closing":
+            if group_send_done:
+                context.user_data["sverka_finalized_entrypoint"] = "closing"
             return await self._prompt_close_shift_amount(
                 update,
                 context,
@@ -5215,7 +5245,7 @@ class SardobaBot:
             icon = "✅" if status.get(key) else "☐"
             keyboard.append([InlineKeyboardButton(f"{icon} {label}", callback_data=f"sv:{key}")])
 
-        finish_text = "🟢 Yakunlash" if lang == 'uz' else "🟢 Yakunlash"
+        finish_text = "🔴 Tugatish" if self._is_closing_sverka(context) else "🟢 Yakunlash"
         cancel_text = "❌ Bekor qilish" if lang == 'uz' else "❌ Bekor qilish"
         keyboard.append(
             [
@@ -5261,6 +5291,24 @@ class SardobaBot:
             return MAIN_MENU
 
         if key == 'finish':
+            if context.user_data.get("sverka_finalizing"):
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text="Kassa yopilishi ma'lumotlari yuborilmoqda. Iltimos, kuting.",
+                )
+                return SUBMIT_DAILY_REPORT
+            if context.user_data.get("sverka_finalized_entrypoint") == "closing":
+                if context.user_data.get("pending_close_amount") is not None:
+                    await context.bot.send_message(
+                        chat_id=query.message.chat_id,
+                        text="Smena yopish summasi qabul qilingan. Endi izoh kiriting:",
+                    )
+                    return CLOSE_SHIFT_NOTE
+                return await self._prompt_close_shift_amount(
+                    update,
+                    context,
+                    text="Kassa yopilishi ma'lumotlari oldin yuborilgan. Endi smenani yopish uchun yakuniy summani kiriting:",
+                )
             if not self._sverka_all_done(context):
                 msg = "Hamma band to'ldirilmagan. Iltimos, qolganlarini to'ldiring." if 'uz' == 'uz' else "Р В РЎСљР В Р’Вµ Р В Р вЂ Р РЋР С“Р В Р’Вµ Р В РЎвЂ”Р РЋРЎвЂњР В Р вЂ¦Р В РЎвЂќР РЋРІР‚С™Р РЋРІР‚в„– Р В Р’В·Р В Р’В°Р В РЎвЂ”Р В РЎвЂўР В Р’В»Р В Р вЂ¦Р В Р’ВµР В Р вЂ¦Р РЋРІР‚в„–. Р В РІР‚вЂќР В Р’В°Р В РЎвЂ”Р В РЎвЂўР В Р’В»Р В Р вЂ¦Р В РЎвЂР РЋРІР‚С™Р В Р’Вµ Р В РЎвЂўР РЋР С“Р РЋРІР‚С™Р В Р’В°Р В Р вЂ Р РЋРІвЂљВ¬Р В РЎвЂР В Р’ВµР РЋР С“Р РЋР РЏ."
                 await context.bot.send_message(chat_id=query.message.chat_id, text=msg)

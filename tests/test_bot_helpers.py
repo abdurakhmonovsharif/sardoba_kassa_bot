@@ -1375,6 +1375,93 @@ async def test_finalize_sverka_from_closing_continues_to_close_amount_step():
 
 
 @pytest.mark.asyncio
+async def test_finalize_sverka_from_closing_is_idempotent_after_group_send():
+    bot = make_bot()
+    bot.save_daily_report = AsyncMock()
+    bot._get_shift_summary = AsyncMock(return_value={"location": "Sardoba", "report_data": {}})
+    bot._send_group_message = AsyncMock()
+    bot._prompt_close_shift_amount = AsyncMock(return_value=CLOSE_SHIFT)
+    context = SimpleNamespace(
+        user_data={
+            "current_shift_id": 5,
+            "flow": "sverka",
+            "sverka_entrypoint": "closing",
+        },
+        bot=SimpleNamespace(send_message=AsyncMock()),
+    )
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=99), effective_message=FakeMessage())
+
+    state1 = await bot._finalize_sverka(update, context)
+    state2 = await bot._finalize_sverka(update, context)
+
+    assert state1 == CLOSE_SHIFT
+    assert state2 == CLOSE_SHIFT
+    bot.save_daily_report.assert_awaited_once()
+    bot._send_group_message.assert_awaited_once()
+    assert context.user_data["sverka_finalized_entrypoint"] == "closing"
+    assert "oldin yuborilgan" in bot._prompt_close_shift_amount.await_args_list[-1].kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_finish_after_closing_finalize_does_not_show_incomplete_menu():
+    bot = make_bot()
+    query = SimpleNamespace(
+        data="sv:finish",
+        message=SimpleNamespace(chat_id=99),
+        answer=AsyncMock(),
+    )
+    update = SimpleNamespace(
+        callback_query=query,
+        effective_chat=SimpleNamespace(id=99),
+        effective_message=FakeMessage(),
+    )
+    context = SimpleNamespace(
+        user_data={
+            "sverka_finalized_entrypoint": "closing",
+            "sverka_status": {"debt_payments": False},
+        },
+        bot=SimpleNamespace(send_message=AsyncMock()),
+    )
+    bot.show_sverka_menu = AsyncMock()
+
+    state = await bot.sverka_select_step(update, context)
+
+    assert state == CLOSE_SHIFT
+    sent_text = context.bot.send_message.await_args.kwargs["text"]
+    assert "oldin yuborilgan" in sent_text
+    assert "Hamma band" not in sent_text
+    bot.show_sverka_menu.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_finish_after_closing_finalize_preserves_pending_close_amount():
+    bot = make_bot()
+    query = SimpleNamespace(
+        data="sv:finish",
+        message=SimpleNamespace(chat_id=99),
+        answer=AsyncMock(),
+    )
+    update = SimpleNamespace(callback_query=query, effective_chat=SimpleNamespace(id=99))
+    context = SimpleNamespace(
+        user_data={
+            "sverka_finalized_entrypoint": "closing",
+            "pending_close_amount": 500_000,
+            "sverka_status": {"debt_payments": False},
+        },
+        bot=SimpleNamespace(send_message=AsyncMock()),
+    )
+    bot.show_sverka_menu = AsyncMock()
+
+    state = await bot.sverka_select_step(update, context)
+
+    assert state == CLOSE_SHIFT_NOTE
+    assert context.user_data["pending_close_amount"] == 500_000
+    sent_text = context.bot.send_message.await_args.kwargs["text"]
+    assert "izoh kiriting" in sent_text.lower()
+    bot.show_sverka_menu.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_show_sverka_menu_includes_cancel_button():
     bot = make_bot()
     context = SimpleNamespace(user_data={}, bot=SimpleNamespace(send_message=AsyncMock()))
@@ -1486,6 +1573,8 @@ async def test_show_sverka_menu_uses_closing_image_flow_order():
     assert "debt_refunds" not in context.user_data["sverka_status"]
     assert "☐ Savdo summasi" not in labels
     assert "tax_z_report_image" in context.user_data["sverka_status"]
+    assert "🔴 Tugatish" in labels
+    assert "🟢 Yakunlash" not in labels
 
 
 @pytest.mark.asyncio
@@ -1659,6 +1748,46 @@ async def test_closing_debt_payments_can_be_skipped_and_marked_absent():
     assert context.user_data["sverka_status"]["debt_payments"] is True
     assert "Qarzga berilgan summa mavjud emas" in message.replies[-1]["text"]
     bot._after_sverka_step.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_closing_last_skipped_step_shows_red_finish_menu():
+    bot = make_bot()
+    update, message = make_text_update("⏭ O'tkazib yuborish")
+    context = SimpleNamespace(
+        user_data={
+            "sverka_entrypoint": "closing",
+            "sverka_sequential": True,
+            "debt_payments_detail_stage": "choice",
+            "pending_sverka_key": "debt_payments",
+            "pending_sverka_state": REPORT_DEBT_PAYMENTS,
+            "sverka_status": {
+                "uzcard_amount": True,
+                "uzcard_payment_image": True,
+                "humo_amount": True,
+                "humo_payment_image": True,
+                "p2p_amount": True,
+                "p2p_payment_image": True,
+                "tax_cash_amount": True,
+                "tax_card_amount": True,
+                "tax_z_report_image": True,
+                "expenses": True,
+                "debt_received": True,
+                "debt_payments": False,
+            },
+        },
+        bot=SimpleNamespace(send_message=AsyncMock()),
+    )
+
+    state = await bot.report_debt_payments(update, context)
+
+    assert state == SUBMIT_DAILY_REPORT
+    assert "Qarzga berilgan summa mavjud emas" in message.replies[-1]["text"]
+    kwargs = context.bot.send_message.await_args.kwargs
+    assert "Barcha bandlar to'ldirildi" in kwargs["text"]
+    labels = [button.text for row in kwargs["reply_markup"].inline_keyboard for button in row]
+    assert "🔴 Tugatish" in labels
+    assert "🟢 Yakunlash" not in labels
 
 
 @pytest.mark.asyncio
