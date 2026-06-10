@@ -37,7 +37,6 @@ from sardoba_bot.core.constants import (
     ADMIN_REPORTS_MENU_ROWS,
     CASHIER_DIRECT_ACTIONS,
     CASHIER_MENU_ROWS,
-    CASHIER_MENU_TEXTS,
     EDIT_REPORT_SELECT,
     EDIT_REPORT_VALUE,
     EXPORT_MENU_ROWS,
@@ -100,6 +99,7 @@ logger = logging.getLogger(__name__)
 POSTGRES_SCHEMA_PATH = Path(__file__).resolve().parents[2] / "sql" / "postgres" / "schema.sql"
 TASHKENT_TZ = ZoneInfo("Asia/Tashkent")
 CASHIER_RESUME_ACTION_TTL_MINUTES = 15
+MAX_DAILY_SHIFTS_PER_LOCATION = 3
 OPENING_GROUP_IMAGE_TITLES = {
     "workplace_status": "Ish joyi rasmi",
     "terminal_power": "Terminal va ratsiyalar quvvatlash jarayoni",
@@ -326,6 +326,36 @@ class SardobaBot:
                 return {}
             return parsed if isinstance(parsed, dict) else {}
         return {}
+
+    async def _location_shift_status_today(self, location_id: int) -> dict:
+        today = self._now_tashkent().date().isoformat()
+        start_bound, end_bound = self._day_bounds(today)
+        row = await self.db.fetch_one(
+            """
+            SELECT
+                l.name AS location,
+                COUNT(s.id) AS shifts_count,
+                COALESCE(BOOL_OR(s.is_open), FALSE) AS has_open_shift
+            FROM locations l
+            LEFT JOIN shifts s
+              ON s.location_id = l.id
+             AND s.opened_at >= %s
+             AND s.opened_at < %s
+            WHERE l.id = %s
+            GROUP BY l.name
+            """,
+            (start_bound, end_bound, location_id),
+        )
+        row = row or {}
+        try:
+            shifts_count = int(row.get("shifts_count") or 0)
+        except Exception:
+            shifts_count = 0
+        return {
+            "location": row.get("location") or "",
+            "shifts_count": shifts_count,
+            "has_open_shift": bool(row.get("has_open_shift")),
+        }
 
     def _normalize_payment_type(self, text: str) -> Optional[str]:
         normalized = (text or "").strip().lower()
@@ -636,6 +666,9 @@ class SardobaBot:
             "uzcard_payment_image_event_time",
             "humo_payment_image_event_time",
             "p2p_payment_image_event_time",
+            "uzcard_payment_image_media_kind",
+            "humo_payment_image_media_kind",
+            "p2p_payment_image_media_kind",
             "tax_cash_amount",
             "tax_card_amount",
             "tax_z_report_image",
@@ -1179,6 +1212,50 @@ class SardobaBot:
                 meta["title"],
                 event_time=context.user_data.get(f"{meta['storage_key']}_event_time"),
             )
+
+    def _build_closing_group_photo_queue(self, context: ContextTypes.DEFAULT_TYPE, row) -> list[dict]:
+        queue = []
+
+        for key in ("uzcard_payment_image", "humo_payment_image", "p2p_payment_image"):
+            meta = self._closing_payment_image_meta(key)
+            if not meta:
+                continue
+            storage_key = meta["storage_key"]
+            file_id = (context.user_data.get(storage_key) or "").strip()
+            if file_id:
+                queue.append(
+                    {
+                        "file_id": file_id,
+                        "image_title": meta["title"],
+                        "media_kind": "photo",
+                    }
+                )
+
+        for idx, item in enumerate(self._debt_payment_check_items(row), 1):
+            file_id = (item.get("check_image") or "").strip()
+            if not file_id:
+                continue
+            name = str(item.get("counterparty_name") or "").strip()
+            title = f"Qarz chek {idx}"
+            if name:
+                title = f"{title}: {name}"
+            queue.append({"file_id": file_id, "image_title": title, "media_kind": "photo"})
+
+        tax_detail = self._tax_info_detail(row)
+        tax_file_id = (tax_detail.get("check_image") or "").strip()
+        if tax_file_id:
+            queue.append({"file_id": tax_file_id, "image_title": "Soliq z-otchet", "media_kind": "photo"})
+
+        return queue
+
+    async def _send_closing_group_photo_album(self, context: ContextTypes.DEFAULT_TYPE, shift_id: int, row) -> bool:
+        queue = self._build_closing_group_photo_queue(context, row)
+        if not queue:
+            return False
+        bot_client = getattr(context, "bot", None)
+        if not bot_client:
+            return False
+        return await self._send_group_labeled_photo_album(bot_client, queue, log_context="Closing photo album")
 
     def _build_expense_detail_lines(self, row) -> list[str]:
         report_data = self._parse_report_data((row or {}).get("report_data"))
@@ -2025,14 +2102,14 @@ class SardobaBot:
         text = (update.message.text or "").strip()
         user_id = update.effective_user.id
 
-        if text == "Restart":
+        if CASHIER_DIRECT_ACTIONS.get(text) == "restart_session" or ADMIN_DIRECT_ACTIONS.get(text) == "restart_session":
             await self.restart_session(update, context)
             return
 
         # If cashier is mid-flow, let ConversationHandler handle and avoid menu spam
         if context.user_data.get('flow') in ['opening', 'sverka', 'closing', 'edit', 'payment_image']:
             if context.user_data.get('flow') == 'payment_image' and context.user_data.get('pending_payment_image'):
-                if text in CASHIER_MENU_TEXTS:
+                if text in CASHIER_DIRECT_ACTIONS:
                     context.user_data.pop('pending_payment_image', None)
                     context.user_data['flow'] = None
                     # oqimni tozaladik, endi pastdagi oddiy menyu dispatch ishlasin
@@ -2168,7 +2245,7 @@ class SardobaBot:
 
             # Require password on each new /start or session
             if context.user_data.get('cashier_pending_password'):
-                if text in CASHIER_MENU_TEXTS:
+                if text in CASHIER_DIRECT_ACTIONS:
                     self._set_cashier_resume_action(context, CASHIER_DIRECT_ACTIONS.get(text))
                     await update.message.reply_text("Tanlangan amal saqlandi. Avval parolni kiriting.")
                     return
@@ -2186,7 +2263,7 @@ class SardobaBot:
                 return
             if not context.user_data.get('cashier_authenticated'):
                 context.user_data['cashier_pending_password'] = True
-                if text in CASHIER_MENU_TEXTS:
+                if text in CASHIER_DIRECT_ACTIONS:
                     self._set_cashier_resume_action(context, CASHIER_DIRECT_ACTIONS.get(text))
                 await update.message.reply_text("Parolni kiriting:")
                 return
@@ -2295,7 +2372,7 @@ class SardobaBot:
         text = (update.message.text or "").strip()
         lang = 'uz'
 
-        if text == "Restart":
+        if CASHIER_DIRECT_ACTIONS.get(text) == "restart_session":
             await self.restart_session(update, context)
             return
 
@@ -2306,7 +2383,7 @@ class SardobaBot:
         active_flow = context.user_data.get('flow')
         if active_flow in ['opening', 'sverka', 'closing', 'payment_image']:
             if active_flow == 'payment_image':
-                if text in CASHIER_MENU_TEXTS:
+                if text in CASHIER_DIRECT_ACTIONS:
                     context.user_data.pop('pending_payment_image', None)
                     context.user_data['flow'] = None
                 else:
@@ -2401,29 +2478,21 @@ class SardobaBot:
             try:
                 user_row = await self.db.fetch_one("SELECT id FROM users WHERE telegram_id = %s", (update.effective_user.id,))
                 if user_row:
-                    today = self._now_tashkent().date().isoformat()
-                    start_bound, end_bound = self._day_bounds(today)
-
-                    # Block if the location already has any shift today (open or closed)
-                    location_today_shift = await self.db.fetch_one(
-                        """
-                        SELECT id, is_open FROM shifts
-                        WHERE location_id=%s AND opened_at >= %s AND opened_at < %s
-                        ORDER BY id DESC LIMIT 1
-                        """,
-                        (location_id, start_bound, end_bound)
-                    )
-                    if location_today_shift:
-                        if bool(location_today_shift.get('is_open')):
-                            await update.message.reply_text(
-                                "Bu filialda hozirda ochiq smena mavjud. "
-                                "Avval o'sha smenani yoping."
-                            )
-                        else:
-                            await update.message.reply_text(
-                                "Bu filialda bugun smena allaqachon ochilgan va yopilgan. "
-                                "Bir kunda bir filial uchun faqat 1 ta smena ochiladi."
-                            )
+                    location_shift_status = await self._location_shift_status_today(int(location_id))
+                    if location_shift_status["has_open_shift"]:
+                        await update.message.reply_text(
+                            "Bu filialda hozirda ochiq smena mavjud. "
+                            "Avval o'sha smenani yoping."
+                        )
+                        await self.show_cashier_menu(update, context)
+                        context.user_data['flow'] = None
+                        return MAIN_MENU
+                    if location_shift_status["shifts_count"] >= MAX_DAILY_SHIFTS_PER_LOCATION:
+                        location_name = location_shift_status.get("location") or await self._get_location_name(location_id)
+                        await update.message.reply_text(
+                            f"Bu filialda bugun {MAX_DAILY_SHIFTS_PER_LOCATION} ta smena ochilgan: {location_name}. "
+                            "Bir kunda bitta filial uchun limit tugagan."
+                        )
                         await self.show_cashier_menu(update, context)
                         context.user_data['flow'] = None
                         return MAIN_MENU
@@ -2530,27 +2599,20 @@ class SardobaBot:
             context.user_data['flow'] = None
             return MAIN_MENU
 
-        today = self._now_tashkent().date().isoformat()
-        start_bound, end_bound = self._day_bounds(today)
-        location_today_shift = await self.db.fetch_one(
-            """
-            SELECT s.id, s.is_open, l.name AS location
-            FROM shifts s
-            JOIN locations l ON s.location_id = l.id
-            WHERE s.location_id=%s AND s.opened_at >= %s AND s.opened_at < %s
-            ORDER BY s.id DESC LIMIT 1
-            """,
-            (location_id, start_bound, end_bound),
-        )
-        if location_today_shift:
-            location_name = location_today_shift.get("location") or await self._get_location_name(location_id)
-            if bool(location_today_shift.get('is_open')):
-                msg = f"Bu filialda hozirda ochiq smena mavjud: {location_name}. Avval o'sha smenani yoping."
-            else:
-                msg = (
-                    f"Bu filialda bugun smena allaqachon ochilgan va yopilgan: {location_name}. "
-                    "Bir kunda bir filial uchun faqat 1 ta smena ochiladi."
-                )
+        location_shift_status = await self._location_shift_status_today(location_id)
+        if location_shift_status["has_open_shift"]:
+            location_name = location_shift_status.get("location") or await self._get_location_name(location_id)
+            msg = f"Bu filialda hozirda ochiq smena mavjud: {location_name}. Avval o'sha smenani yoping."
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
+            await self.show_cashier_menu(update, context)
+            context.user_data['flow'] = None
+            return MAIN_MENU
+        if location_shift_status["shifts_count"] >= MAX_DAILY_SHIFTS_PER_LOCATION:
+            location_name = location_shift_status.get("location") or await self._get_location_name(location_id)
+            msg = (
+                f"Bu filialda bugun {MAX_DAILY_SHIFTS_PER_LOCATION} ta smena ochilgan: {location_name}. "
+                "Bir kunda bitta filial uchun limit tugagan."
+            )
             await context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
             await self.show_cashier_menu(update, context)
             context.user_data['flow'] = None
@@ -3492,9 +3554,7 @@ class SardobaBot:
                 shift_summary = await self._get_shift_summary(shift_id) or {}
                 entrypoint = context.user_data.get("sverka_entrypoint")
                 if entrypoint == "closing":
-                    await self._send_closing_payment_images(context, int(shift_id))
-                    await self._send_debt_payment_check_images(context, shift_summary)
-                    await self._send_tax_info_check_image(context, shift_summary)
+                    await self._send_closing_group_photo_album(context, int(shift_id), shift_summary)
                     summary_text = self._build_sverka_summary_message(
                         shift_summary,
                         title="🔒 Kassa yopilishi ma'lumotlari",
@@ -3632,6 +3692,7 @@ class SardobaBot:
                 await self._save_shift_image(int(shift_id), payment_image_meta["image_type"], file_id)
                 context.user_data[payment_image_meta["storage_key"]] = file_id
                 context.user_data[f"{payment_image_meta['storage_key']}_event_time"] = getattr(update.message, "date", None)
+                context.user_data[f"{payment_image_meta['storage_key']}_media_kind"] = self._get_image_media_kind(update)
                 context.user_data.pop("pending_payment_image", None)
                 context.user_data.pop("pending_sverka_key", None)
                 context.user_data.pop("pending_sverka_state", None)
@@ -3654,7 +3715,7 @@ class SardobaBot:
                         context.user_data['current_shift_id'] = shift_id
 
             if key not in ('uzcard', 'humo') or not shift_id:
-                await update.message.reply_text("Avval `Rasm jo'natish` tugmasini bosib, Uzcard yoki Humo ni tanlang.")
+                await update.message.reply_text("Avval to'lov rasmi turini tanlang.")
                 context.user_data.pop('pending_payment_image', None)
                 context.user_data['flow'] = None
                 return MAIN_MENU
@@ -4640,11 +4701,11 @@ class SardobaBot:
             logger.exception("_add_image_label failed: file_id=%s label=%s", file_id, label)
             return None
 
-    async def _send_opening_group_photo_album(self, bot_client, queue: list) -> bool:
-        """Send opening photos as one watermarked album without depending on user session state."""
+    async def _send_group_labeled_photo_album(self, bot_client, queue: list, *, log_context: str = "Photo album") -> bool:
+        """Send queued images as one labeled album without depending on user session state."""
         group_chat_id = await self._get_group_chat_id()
         if not group_chat_id:
-            logger.warning("Opening photo album skipped: group_chat_id not configured")
+            logger.warning("%s skipped: group_chat_id not configured", log_context)
             return False
 
         # Build one flat media list — all image types combined
@@ -4683,8 +4744,16 @@ class SardobaBot:
                 await bot_client.send_media_group(chat_id=group_chat_id, media=chunk)
             return True
         except Exception:
-            logger.exception("Failed to send opening photo album to group %s", group_chat_id)
+            logger.exception("Failed to send %s to group %s", log_context, group_chat_id)
             return False
+
+    async def _send_opening_group_photo_album(self, bot_client, queue: list) -> bool:
+        """Send opening photos as one watermarked album without depending on user session state."""
+        return await self._send_group_labeled_photo_album(
+            bot_client,
+            queue,
+            log_context="Opening photo album",
+        )
 
     async def _flush_opening_group_photos(self, context: ContextTypes.DEFAULT_TYPE, shift_id: int) -> None:
         """Send all opening photos as a single watermarked album to the group."""
@@ -5968,7 +6037,10 @@ def main():
         .post_shutdown(_post_shutdown)
         .build()
     )
-    restart_text_filter = filters.TEXT & filters.Regex(r"^\s*Restart\s*$")
+    restart_text_filter = filters.TEXT & filters.Regex(r"^\s*(?:🔄\s*)?Restart\s*$")
+    open_shift_text_filter = filters.TEXT & filters.Regex(r"^\s*(?:✅\s*)?Smena ochish\s*$")
+    sverka_text_filter = filters.TEXT & filters.Regex(r"^\s*(?:📋\s*)?Sverka\s*$")
+    close_shift_text_filter = filters.TEXT & filters.Regex(r"^\s*(?:🔒\s*)?Smena yopish\s*$")
 
     # Create conversation handler for registration flow
     conv_handler = ConversationHandler(
@@ -5995,9 +6067,9 @@ def main():
 
     cashier_conv = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.TEXT & filters.Regex(r"^\s*Smena ochish\s*$"), bot.start_shift_opening),
-            MessageHandler(filters.TEXT & filters.Regex(r"^\s*Sverka\s*$"), bot.start_daily_reporting),
-            MessageHandler(filters.TEXT & filters.Regex(r"^\s*Smena yopish\s*$"), bot.start_shift_closing),
+            MessageHandler(open_shift_text_filter, bot.start_shift_opening),
+            MessageHandler(sverka_text_filter, bot.start_daily_reporting),
+            MessageHandler(close_shift_text_filter, bot.start_shift_closing),
             CallbackQueryHandler(bot.select_location, pattern='^loc_'),
         ],
         states={

@@ -2,6 +2,15 @@ def _flatten(rows):
     return {label for row in rows for label in row}
 
 
+RESTART_MENU_TEXT = "🔄 Restart"
+LEGACY_RESTART_MENU_TEXT = "Restart"
+OPEN_SHIFT_MENU_TEXT = "✅ Smena ochish"
+CLOSE_SHIFT_MENU_TEXT = "🔒 Smena yopish"
+SVERKA_MENU_TEXT = "📋 Sverka"
+LEGACY_OPEN_SHIFT_MENU_TEXT = "Smena ochish"
+LEGACY_CLOSE_SHIFT_MENU_TEXT = "Smena yopish"
+LEGACY_SVERKA_MENU_TEXT = "Sverka"
+
 (
     SELECT_ROLE, REGISTER_FIRSTNAME, REGISTER_LASTNAME,
     REGISTER_PHONE, REGISTER_PASSWORD, VERIFY_PASSWORD, ADMIN_LOGIN,
@@ -22,7 +31,7 @@ ADMIN_MENU_ROWS = (
     ("Hisobotlar", "Barcha kassirlar"),
     ("Kassir so'rovlari", "Ma'lumotlarni o'zgartirish"),
     ("Excel/PDF yuklab olish",),
-    ("Restart",),
+    (RESTART_MENU_TEXT,),
 )
 
 ADMIN_REPORTS_MENU_ROWS = (
@@ -32,10 +41,8 @@ ADMIN_REPORTS_MENU_ROWS = (
 )
 
 CASHIER_MENU_ROWS = (
-    ("Smena ochish", "Smena yopish"),
-    ("Sverka", "Rasm jo'natish"),
-    ("Hisobotlarni tahrirlash",),
-    ("Restart",),
+    (OPEN_SHIFT_MENU_TEXT, CLOSE_SHIFT_MENU_TEXT),
+    (SVERKA_MENU_TEXT, RESTART_MENU_TEXT),
 )
 
 EXPORT_MENU_ROWS = (
@@ -63,14 +70,19 @@ ADMIN_DIRECT_ACTIONS = {
     "Kassir so'rovlari": "handle_approval_requests",
     "Ma'lumotlarni o'zgartirish": "modify_user_data",
     "Excel/PDF yuklab olish": "export_data",
-    "Restart": "restart_session",
+    RESTART_MENU_TEXT: "restart_session",
+    LEGACY_RESTART_MENU_TEXT: "restart_session",
 }
 
 CASHIER_DIRECT_ACTIONS = {
-    "Smena ochish": "start_shift_opening",
-    "Smena yopish": "start_shift_closing",
-    "Sverka": "start_daily_reporting",
+    OPEN_SHIFT_MENU_TEXT: "start_shift_opening",
+    CLOSE_SHIFT_MENU_TEXT: "start_shift_closing",
+    SVERKA_MENU_TEXT: "start_daily_reporting",
+    LEGACY_OPEN_SHIFT_MENU_TEXT: "start_shift_opening",
+    LEGACY_CLOSE_SHIFT_MENU_TEXT: "start_shift_closing",
+    LEGACY_SVERKA_MENU_TEXT: "start_daily_reporting",
     "Rasm jo'natish": "start_payment_image_upload",
     "Hisobotlarni tahrirlash": "edit_reports",
-    "Restart": "restart_session",
+    RESTART_MENU_TEXT: "restart_session",
+    LEGACY_RESTART_MENU_TEXT: "restart_session",
 }

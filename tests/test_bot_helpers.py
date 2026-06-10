@@ -1248,76 +1248,58 @@ async def test_finalize_sverka_sends_debt_payment_check_image_to_group():
 
 
 @pytest.mark.asyncio
-async def test_finalize_sverka_from_closing_sends_tax_image_before_group_summary():
-    class FakeTelegramFile:
-        async def download_as_bytearray(self):
-            raw = BytesIO()
-            PILImage.new("RGB", (320, 180), (240, 240, 240)).save(raw, format="JPEG")
-            return bytearray(raw.getvalue())
-
+async def test_finalize_sverka_from_closing_sends_photo_album_before_group_summary():
     bot = make_bot()
     bot.save_daily_report = AsyncMock()
     bot._get_group_chat_id = AsyncMock(return_value=-100123)
     send_order = []
-    bot._get_shift_summary = AsyncMock(
-        return_value={
-            "first_name": "Ali",
-            "last_name": "Valiyev",
-            "location": "Sardoba",
-            "opened_at": "2026-05-22 10:00:00",
-            "sales_amount": 0,
-            "debt_received": 0,
-            "expenses": 0,
-            "uzcard_amount": 0,
-            "humo_amount": 0,
-            "p2p_amount": 0,
-            "uzcard_refund": 0,
-            "humo_refund": 0,
-            "other_payments": 0,
-            "debt_payments": 0,
-            "debt_refunds": 0,
-            "report_data": {
-                "tax_info": {
-                    "check_image": "file_tax",
-                    "cash_amount": 25_000,
-                }
-            },
-        }
-    )
+    shift_summary = {
+        "first_name": "Ali",
+        "last_name": "Valiyev",
+        "location": "Sardoba",
+        "opened_at": "2026-05-22 10:00:00",
+        "sales_amount": 0,
+        "debt_received": 0,
+        "expenses": 0,
+        "uzcard_amount": 0,
+        "humo_amount": 0,
+        "p2p_amount": 0,
+        "uzcard_refund": 0,
+        "humo_refund": 0,
+        "other_payments": 0,
+        "debt_payments": 0,
+        "debt_refunds": 0,
+        "report_data": {
+            "tax_info": {
+                "check_image": "file_tax",
+                "cash_amount": 25_000,
+            }
+        },
+    }
+    bot._get_shift_summary = AsyncMock(return_value=shift_summary)
 
     async def fake_send_group_message(*args, **kwargs):
         send_order.append("summary")
         return True
 
-    async def fake_send_closing_payment_images(*args, **kwargs):
-        send_order.append("payment_images")
-
-    async def fake_send_photo(*args, **kwargs):
-        send_order.append("tax_photo")
+    async def fake_send_closing_album(*args, **kwargs):
+        send_order.append("photo_album")
         return True
 
     bot._send_group_message = AsyncMock(side_effect=fake_send_group_message)
-    bot._send_closing_payment_images = AsyncMock(side_effect=fake_send_closing_payment_images)
+    bot._send_closing_group_photo_album = AsyncMock(side_effect=fake_send_closing_album)
     bot._prompt_close_shift_amount = AsyncMock(return_value=CLOSE_SHIFT)
     context = SimpleNamespace(
         user_data={"current_shift_id": 5, "flow": "sverka", "sverka_entrypoint": "closing"},
-        bot=SimpleNamespace(
-            send_message=AsyncMock(),
-            get_file=AsyncMock(return_value=FakeTelegramFile()),
-            send_photo=AsyncMock(side_effect=fake_send_photo),
-        ),
+        bot=SimpleNamespace(send_message=AsyncMock()),
     )
     update = SimpleNamespace(effective_chat=SimpleNamespace(id=99), effective_message=FakeMessage())
 
     state = await bot._finalize_sverka(update, context)
 
     assert state == CLOSE_SHIFT
-    context.bot.get_file.assert_awaited_once_with("file_tax")
-    context.bot.send_photo.assert_awaited_once()
-    assert context.bot.send_photo.await_args.kwargs["chat_id"] == -100123
-    assert "caption" not in context.bot.send_photo.await_args.kwargs
-    assert send_order == ["payment_images", "tax_photo", "summary"]
-    bot._send_closing_payment_images.assert_awaited_once_with(context, 5)
+    assert send_order == ["photo_album", "summary"]
+    bot._send_closing_group_photo_album.assert_awaited_once_with(context, 5, shift_summary)
     group_text = bot._send_group_message.await_args.args[1]
     assert group_text.startswith("🔒 Kassa yopilishi ma'lumotlari")
 
@@ -1865,6 +1847,53 @@ async def test_open_shift_amount_rejects_letters():
 
 
 @pytest.mark.asyncio
+async def test_open_shift_amount_allows_third_shift_for_location_today():
+    bot = make_bot(
+        FakeDB(
+            fetch_one_results=[
+                {"id": 7},
+                {"shifts_count": 2, "has_open_shift": False, "location": "Sardoba"},
+                {"id": 5},
+            ]
+        )
+    )
+    bot.show_cashier_menu = AsyncMock()
+    update, message = make_text_update("120000")
+    context = SimpleNamespace(user_data={"location_id": 1})
+
+    state = await bot.open_shift_amount(update, context)
+
+    assert state == UPLOAD_WORKPLACE_STATUS
+    assert context.user_data["current_shift_id"] == 5
+    assert bot.db.execute_calls
+    assert message.replies[0]["text"] == "Summa tasdiqlandi."
+    bot.show_cashier_menu.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_open_shift_amount_blocks_fourth_shift_for_location_today():
+    bot = make_bot(
+        FakeDB(
+            fetch_one_results=[
+                {"id": 7},
+                {"shifts_count": 3, "has_open_shift": False, "location": "Sardoba"},
+            ]
+        )
+    )
+    bot.show_cashier_menu = AsyncMock()
+    update, message = make_text_update("120000")
+    context = SimpleNamespace(user_data={"location_id": 1})
+
+    state = await bot.open_shift_amount(update, context)
+
+    assert state == MAIN_MENU
+    assert context.user_data["flow"] is None
+    assert not bot.db.execute_calls
+    assert "bugun 3 ta smena ochilgan: Sardoba" in message.replies[0]["text"]
+    bot.show_cashier_menu.assert_awaited_once_with(update, context)
+
+
+@pytest.mark.asyncio
 async def test_start_shift_opening_shows_locations_before_open_shift_conflict_check():
     bot = make_bot(
         FakeDB(
@@ -1922,7 +1951,7 @@ async def test_select_location_blocks_location_open_shift_with_location_name():
             fetch_one_results=[
                 {"id": 7},
                 None,
-                {"id": 8, "is_open": True, "location": "Sardoba"},
+                {"shifts_count": 1, "has_open_shift": True, "location": "Sardoba"},
             ]
         )
     )
@@ -1943,6 +1972,64 @@ async def test_select_location_blocks_location_open_shift_with_location_name():
     text = context.bot.send_message.await_args.kwargs["text"]
     assert "Bu filialda hozirda ochiq smena mavjud: Sardoba" in text
     bot.show_cashier_menu.assert_awaited_once_with(update, context)
+    query.edit_message_text.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_select_location_allows_third_shift_for_location_today():
+    bot = make_bot(
+        FakeDB(
+            fetch_one_results=[
+                {"id": 7},
+                None,
+                {"shifts_count": 2, "has_open_shift": False, "location": "Sardoba"},
+            ]
+        )
+    )
+    bot.show_cashier_menu = AsyncMock()
+    query = SimpleNamespace(data="loc_1", answer=AsyncMock(), edit_message_text=AsyncMock())
+    update = SimpleNamespace(
+        callback_query=query,
+        effective_user=SimpleNamespace(id=42),
+        effective_chat=SimpleNamespace(id=99),
+    )
+    context = SimpleNamespace(user_data={}, bot=SimpleNamespace(send_message=AsyncMock()))
+
+    state = await bot.select_location(update, context)
+
+    assert state == OPEN_SHIFT_AMOUNT
+    assert context.user_data["location_id"] == 1
+    assert context.user_data["flow"] == "opening"
+    query.edit_message_text.assert_awaited_once()
+    bot.show_cashier_menu.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_select_location_blocks_fourth_shift_for_location_today():
+    bot = make_bot(
+        FakeDB(
+            fetch_one_results=[
+                {"id": 7},
+                None,
+                {"shifts_count": 3, "has_open_shift": False, "location": "Sardoba"},
+            ]
+        )
+    )
+    bot.show_cashier_menu = AsyncMock()
+    query = SimpleNamespace(data="loc_1", answer=AsyncMock(), edit_message_text=AsyncMock())
+    update = SimpleNamespace(
+        callback_query=query,
+        effective_user=SimpleNamespace(id=42),
+        effective_chat=SimpleNamespace(id=99),
+    )
+    context = SimpleNamespace(user_data={}, bot=SimpleNamespace(send_message=AsyncMock()))
+
+    state = await bot.select_location(update, context)
+
+    assert state == MAIN_MENU
+    assert context.user_data["flow"] is None
+    text = context.bot.send_message.await_args.kwargs["text"]
+    assert "bugun 3 ta smena ochilgan: Sardoba" in text
     query.edit_message_text.assert_not_awaited()
 
 
@@ -2185,7 +2272,7 @@ async def test_handle_message_closing_flow_routes_to_amount_step_when_amount_mis
         ("Kassir so'rovlari", "handle_approval_requests"),
         ("Ma'lumotlarni o'zgartirish", "modify_user_data"),
         ("Excel/PDF yuklab olish", "export_data"),
-        ("Restart", "restart_session"),
+        ("🔄 Restart", "restart_session"),
     ],
 )
 async def test_admin_buttons_dispatch_to_expected_handlers(text, method_name):
@@ -2231,12 +2318,12 @@ async def test_admin_report_period_buttons_dispatch_to_location_prompt(text, per
 @pytest.mark.parametrize(
     ("text", "method_name"),
     [
-        ("Smena ochish", "start_shift_opening"),
-        ("Smena yopish", "start_shift_closing"),
-        ("Sverka", "start_daily_reporting"),
+        ("✅ Smena ochish", "start_shift_opening"),
+        ("🔒 Smena yopish", "start_shift_closing"),
+        ("📋 Sverka", "start_daily_reporting"),
         ("Rasm jo'natish", "start_payment_image_upload"),
         ("Hisobotlarni tahrirlash", "edit_reports"),
-        ("Restart", "restart_session"),
+        ("🔄 Restart", "restart_session"),
     ],
 )
 async def test_cashier_buttons_dispatch_to_expected_handlers(text, method_name):
@@ -2253,6 +2340,29 @@ async def test_cashier_buttons_dispatch_to_expected_handlers(text, method_name):
         "edit_reports",
         "restart_session",
     ):
+        setattr(bot, name, AsyncMock())
+
+    await bot.handle_cashier_command(update, context, user)
+
+    getattr(bot, method_name).assert_awaited_once_with(update, context)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "method_name"),
+    [
+        ("Smena ochish", "start_shift_opening"),
+        ("Smena yopish", "start_shift_closing"),
+        ("Sverka", "start_daily_reporting"),
+    ],
+)
+async def test_legacy_cashier_buttons_still_dispatch(text, method_name):
+    bot = make_bot()
+    update, _ = make_text_update(text)
+    context = SimpleNamespace(user_data={})
+    user = {"role": "cashier", "first_name": "Cashier"}
+
+    for name in ("start_shift_opening", "start_shift_closing", "start_daily_reporting"):
         setattr(bot, name, AsyncMock())
 
     await bot.handle_cashier_command(update, context, user)
@@ -2307,7 +2417,7 @@ async def test_restart_button_clears_active_cashier_flow_and_requires_password()
     bot = make_bot(
         FakeDB(fetch_one_results=[{"role": "cashier", "first_name": "Ali", "password_hash": hash_password("0000")}])
     )
-    update, message = make_text_update("Restart")
+    update, message = make_text_update("🔄 Restart")
     context = SimpleNamespace(
         user_data={
             "flow": "opening",
@@ -2323,6 +2433,20 @@ async def test_restart_button_clears_active_cashier_flow_and_requires_password()
     assert "cashier_authenticated" not in context.user_data
     assert message.replies[0]["text"] == "Bot qayta ishga tushirildi."
     assert message.replies[-1]["text"] == "Parolni kiriting:"
+
+
+@pytest.mark.asyncio
+async def test_legacy_restart_text_still_resets_session():
+    bot = make_bot(
+        FakeDB(fetch_one_results=[{"role": "cashier", "first_name": "Ali", "password_hash": hash_password("0000")}])
+    )
+    update, message = make_text_update("Restart")
+    context = SimpleNamespace(user_data={"flow": "sverka", "cashier_authenticated": True})
+
+    await bot.handle_message(update, context)
+
+    assert context.user_data["cashier_pending_password"] is True
+    assert message.replies[0]["text"] == "Bot qayta ishga tushirildi."
 
 
 @pytest.mark.asyncio
@@ -2379,6 +2503,13 @@ async def test_menu_layouts_match_constants():
 
     assert [[button.text for button in row] for row in admin_markup.keyboard] == [list(row) for row in ADMIN_MENU_ROWS]
     assert [[button.text for button in row] for row in cashier_markup.keyboard] == [list(row) for row in CASHIER_MENU_ROWS]
+    cashier_labels = [button.text for row in cashier_markup.keyboard for button in row]
+    assert "Rasm jo'natish" not in cashier_labels
+    assert "Hisobotlarni tahrirlash" not in cashier_labels
+    assert "✅ Smena ochish" in cashier_labels
+    assert "🔒 Smena yopish" in cashier_labels
+    assert "📋 Sverka" in cashier_labels
+    assert "🔄 Restart" in cashier_labels
 
 
 @pytest.mark.asyncio
@@ -2783,4 +2914,57 @@ async def test_flush_opening_group_photos_clears_queue_without_bot_client():
     await bot._flush_opening_group_photos(context, 5)
 
     assert "pending_opening_group_photos" not in context.user_data
+
+
+@pytest.mark.asyncio
+async def test_send_closing_group_photo_album_sends_labeled_media_group():
+    class FakeTelegramFile:
+        async def download_to_memory(self, buf):
+            raw = BytesIO()
+            PILImage.new("RGB", (320, 180), (240, 240, 240)).save(raw, format="JPEG")
+            buf.write(raw.getvalue())
+
+    bot = make_bot(FakeDB(fetch_one_results=[{"group_chat_id": -100123}]))
+    file_ids = {"file_uz", "file_hu", "file_p2p", "file_debt", "file_tax"}
+    context = SimpleNamespace(
+        user_data={
+            "uzcard_payment_image": "file_uz",
+            "humo_payment_image": "file_hu",
+            "p2p_payment_image": "file_p2p",
+            "uzcard_payment_image_media_kind": "photo",
+            "humo_payment_image_media_kind": "photo",
+            "p2p_payment_image_media_kind": "photo",
+        },
+        bot=SimpleNamespace(
+            get_file=AsyncMock(return_value=FakeTelegramFile()),
+            send_media_group=AsyncMock(),
+        ),
+    )
+    row = {
+        "report_data": {
+            "debt_payments_detail": {
+                "items": [
+                    {
+                        "counterparty_name": "Sharif",
+                        "amount": 10_000,
+                        "check_image": "file_debt",
+                    }
+                ]
+            },
+            "tax_info": {
+                "check_image": "file_tax",
+                "cash_amount": 25_000,
+            },
+        }
+    }
+
+    sent = await bot._send_closing_group_photo_album(context, 5, row)
+
+    assert sent is True
+    context.bot.send_media_group.assert_awaited_once()
+    kwargs = context.bot.send_media_group.await_args.kwargs
+    assert kwargs["chat_id"] == -100123
+    assert len(kwargs["media"]) == 5
+    assert context.bot.get_file.await_count == 5
+    assert all(item.media not in file_ids for item in kwargs["media"])
     assert "pending_opening_group_photos" not in context.user_data
