@@ -1494,15 +1494,10 @@ class SardobaBot:
             f"💸 Savdo: {self._fmt_money(row.get('sales_amount'))}",
             f"📥 Kelgan qarz: {self._fmt_money(row.get('debt_received'))}",
             f"📉 Chiqim: {self._fmt_money(row.get('expenses'))}",
+            f"💳 Uzcard: {self._fmt_money(row.get('uzcard_amount'))}",
+            f"💳 Humo: {self._fmt_money(row.get('humo_amount'))}",
+            f"💳 P2P: {self._fmt_money(row.get('p2p_amount'))}",
         ]
-        if not closing:
-            lines.extend(
-                [
-                    f"💳 Uzcard: {self._fmt_money(row.get('uzcard_amount'))}",
-                    f"💳 Humo: {self._fmt_money(row.get('humo_amount'))}",
-                    f"💳 P2P: {self._fmt_money(row.get('p2p_amount'))}",
-                ]
-            )
         lines.extend(
             [
                 f"🧷 Boshqa to'lovlar: {self._format_other_payments_value(row)}",

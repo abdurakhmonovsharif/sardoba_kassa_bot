@@ -448,9 +448,9 @@ def test_build_sverka_summary_message_can_use_closing_title_and_tax_info():
     assert "💵 Soliq naqdga berilgan summa: 50 000" in text
     assert "💳 Soliq plastikka berilgan summa: 25 000" in text
     assert "📷 Soliq z-otchet rasmi biriktirilgan" in text
-    assert "💳 Uzcard:" not in text
-    assert "💳 Humo:" not in text
-    assert "💳 P2P:" not in text
+    assert "💳 Uzcard: 99 000" in text
+    assert "💳 Humo: 88 000" in text
+    assert "💳 P2P: 77 000" in text
     assert "🧮 Naqd kutiladigan summa: 10 000" in text
 
 
